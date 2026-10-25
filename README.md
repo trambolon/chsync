@@ -7,21 +7,41 @@
 * DDL берётся с живых хостов-источников (`system.tables.create_table_query`), выполняется
   **напрямую** на каждом новом хосте (без `ON CLUSTER`), только `CREATE ... IF NOT EXISTS`.
 * Никогда не делает `DROP / ALTER / RENAME / INSERT`. Повторный запуск безопасен (идемпотентно).
-* Один статический бинарник, Go, работает через HTTP-интерфейс (8123/8443). Зависимость одна —
-  TOML-парсер, она лежит в `vendor/` (сборка без интернета).
+* Один статический бинарник на Go 1.27, работает через HTTP-интерфейс (8123/8443). Зависимость одна —
+  TOML-парсер (BurntSushi/toml v1.6.0), она лежит в `vendor/` (сборка без интернета).
 
 Порядок работ по подключению шардов — в **RUNBOOK.md**. Здесь — только про утилиту.
 
 ## Структура проекта
 
-| Файл | Что внутри |
-|---|---|
-| `main.go` | CLI, конфиг (TOML, умолчания, валидация), сценарий plan/apply, утилиты |
-| `clickhouse.go` | HTTP-клиент ClickHouse, снимок хоста (БД, объекты, макросы, кластеры, окружение), запросы к ZK |
-| `ddl.go` | Разбор DDL: вид объекта, UUID, аргументы движка, ZK-пути и макросы, ссылки между объектами; фильтры |
-| `plan.go` | Объединение источников, каскадное исключение, порядок создания, план, проверки ZK, apply, verify, отчёты |
-| `check.go` | `check` (в т.ч. контроль репликации) и `diff` |
-| `chsync_test.go` | Юнит-тесты без сети |
+```
+cmd/chsync/main.go        точка входа: сигналы (Ctrl+C) и код выхода, вся логика — в internal/app
+internal/
+  app/        app.go        команды и флаги, выбор хостов, чтение снимков, запуск сценария
+              planapply.go  сценарий plan/apply: план по target, SQL-файлы, apply, verify, подтверждение
+  config/     config.go     chsync.toml: типы, умолчания, Load/Finalize/Validate; chsync.example.toml (встроен)
+  logging/    log.go        log/slog: компактный вывод в консоль + slog.TextHandler в apply.log (MultiHandler)
+  storage/    storage.go    HTTP-клиент ClickHouse: Exec, Select[T] (generic-метод, потоковый encoding/json/v2)
+              inventory.go  снимок хоста: БД, объекты, UDF, макросы, кластеры, политики, диски, настройки
+              zookeeper.go  чтение детей узлов ZooKeeper/Keeper через system.zookeeper
+  schema/     ddl.go        вид объекта, заголовок CREATE, UUID, нормализация DDL
+              engine.go     аргументы движка, ZK-путь Replicated, макросы
+              refs.go       ссылки между объектами (зависимости)
+  filter/     filter.go     исключения: БД, регэкспы (bms), объекты, движки
+  plan/       union.go      объединение схем источников, дрейф между ними
+              order.go      зависимости, каскадное исключение, топологическая сортировка
+              plan.go       план по target (CREATE/EXISTS/DRIFT/BLOCKED/SKIP/EXTRA)
+              validate.go   проверки перед CREATE: ZK-пути, коллизии макросов, кластер, storage_policy
+              apply.go      выполнение CREATE с повторными проходами
+              verify.go     сверка target после apply
+              output.go     печать плана и SQL-скрипт
+  check/      check.go, replication.go, environment.go — команда check
+  diff/       diff.go       команда diff
+  report/     report.go     каталог результатов запуска (запись через os.Root)
+  xstrings/   xstrings.go   мелкие строковые помощники
+```
+
+Тесты лежат рядом с кодом (`*_test.go`), сеть им не нужна: `make test`.
 
 ## Шарды с репликацией и без
 
@@ -114,9 +134,9 @@ cascade_exclude    = true           # MV/VIEW/Distributed/словари над 
 
 ```bash
 # с машины, где лежит архив
-scp chsync-1.0.0.tar.gz admin@jump-host:/tmp/
+scp chsync-1.2.0.tar.gz admin@jump-host:/tmp/
 ssh admin@jump-host
-cd /tmp && tar xzf chsync-1.0.0.tar.gz && cd chsync
+cd /tmp && tar xzf chsync-1.2.0.tar.gz && cd chsync
 sha256sum -c dist/SHA256SUMS
 sudo install -m 0755 dist/chsync-linux-amd64 /usr/local/bin/chsync   # arm64: chsync-linux-arm64
 chsync version
@@ -124,13 +144,27 @@ chsync version
 
 ### Вариант B — сборка из исходников
 
+Нужен **Go 1.27+**. В репозиториях Debian его нет (Debian 12 — Go 1.19, Debian 13 — Go 1.24),
+поэтому ставим официальный дистрибутив с go.dev:
+
 ```bash
-sudo apt update
-sudo apt install -y golang-go make       # Debian 12: Go 1.19 — достаточно, Debian 13: Go 1.24
+sudo apt update && sudo apt install -y make ca-certificates curl
+curl -fLO https://go.dev/dl/go1.27.3.linux-amd64.tar.gz      # arm64: go1.27.3.linux-arm64.tar.gz
+# сверьте SHA256 со страницей https://go.dev/dl/
+sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.27.3.linux-amd64.tar.gz
+export PATH=/usr/local/go/bin:$PATH                           # и в ~/.profile
+go version                                                    # go1.27.3
+
 cd chsync
-make test build                           # = go test + go build -mod=vendor (интернет не нужен)
+make test build                    # go vet + go test -race + go build (-mod=vendor, интернет не нужен)
 sudo install -m 0755 chsync /usr/local/bin/chsync
 ```
+
+Если уже стоит Go 1.21+ и есть доступ к proxy.golang.org, можно ничего не ставить вручную:
+`go` сам скачает нужный toolchain по строке `go 1.27` в `go.mod` (`GOTOOLCHAIN=auto`).
+
+Прочие цели Makefile: `make lint` (gofmt + staticcheck, если установлен), `make fix` (что могут
+упростить модернизаторы `go fix`), `make dist` (бинарники linux amd64/arm64 + SHA256SUMS).
 
 ### Запуск
 
@@ -148,16 +182,25 @@ chsync apply --execute
 chsync diff
 ```
 
-Пользователь для chsync (если не хотите запускать под admin):
+Пользователь для chsync (если не хотите запускать под admin). Права проверены на ClickHouse 26.3.2.3:
 
 ```sql
-CREATE USER chsync IDENTIFIED WITH sha256_password BY '***' HOST IP '10.0.0.0/8';
-GRANT SHOW, SELECT ON *.* TO chsync;          -- метаданные, system.*, system.zookeeper
-GRANT REMOTE ON *.* TO chsync;                -- check: clusterAllReplicas
--- на НОВЫХ хостах дополнительно:
-GRANT CREATE DATABASE, CREATE TABLE, CREATE VIEW, CREATE DICTIONARY, CREATE FUNCTION,
-      INSERT, dictGet ON *.* TO chsync;
+-- на ВСЕХ хостах (старые — ON CLUSTER, на новых — без него): только чтение
+CREATE USER IF NOT EXISTS chsync IDENTIFIED WITH sha256_password BY '***'
+  HOST IP '10.0.0.5'                 -- адрес jump-хоста
+  SETTINGS readonly = 2;
+GRANT SHOW ON *.* TO chsync;                    -- DDL объектов
+GRANT SELECT ON system.* TO chsync;             -- system.tables/macros/clusters/zookeeper/replicas
+GRANT SHOW USERS, SHOW ROLES ON *.* TO chsync;  -- check: сверка пользователей и ролей
+
+-- только на НОВЫХ хостах: запись
+ALTER USER chsync SETTINGS readonly = 0;
+GRANT SELECT, INSERT, CREATE DATABASE, CREATE TABLE, CREATE VIEW,
+      CREATE DICTIONARY, CREATE FUNCTION, REMOTE ON *.* TO chsync;
 ```
+
+`SELECT, INSERT` нужны только для `CREATE MATERIALIZED VIEW` (иначе `ACCESS_DENIED`, Code 497 —
+apply подскажет). После работ пользователя можно удалить: MV в 26.3 создаются без привязки к нему.
 
 ## Репетиция на стенде (рекомендуется перед продом)
 

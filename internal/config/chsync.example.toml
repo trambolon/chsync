@@ -15,8 +15,9 @@ dry_run = true
 [connection]            # общие параметры для всех хостов (HTTP-интерфейс)
 port = 8123             # 8443 при secure = true
 secure = false
-user = "chsync"         # нужны права: SHOW, CREATE DATABASE/TABLE/VIEW/DICTIONARY/FUNCTION на target,
-                        # SELECT на system.*, system.zookeeper
+user = "chsync"         # права: на всех хостах SHOW, SHOW USERS, SHOW ROLES, SELECT ON system.*;
+                        # на target ещё SELECT, INSERT (для MV), CREATE DATABASE/TABLE/VIEW/DICTIONARY/FUNCTION,
+                        # REMOTE. Подробно — README, раздел «Запуск»
 password_env = "CHSYNC_PASSWORD"   # пароль берётся из переменной окружения
 # password = ""                    # можно и так, но лучше через env
 timeout_sec = 120
