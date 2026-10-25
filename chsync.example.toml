@@ -1,0 +1,87 @@
+# chsync.toml - синхронизация схемы ClickHouse на новые шарды
+# Все DDL выполняются НАПРЯМУЮ на target-хостах (без ON CLUSTER), только CREATE ... IF NOT EXISTS.
+# chsync никогда не делает DROP/ALTER/RENAME.
+
+# Имя кластера из <remote_servers> (для проверок remote_servers и Distributed)
+cluster = "prod_cluster"
+
+# Куда складывать планы, SQL-скрипты и логи (подкаталог на каждый запуск)
+output_dir = "./chsync-out"
+
+# true  - apply только показывает план (как plan). Выполнение: --execute
+# false - apply выполняет DDL (с подтверждением, если нет --yes)
+dry_run = true
+
+[connection]            # общие параметры для всех хостов (HTTP-интерфейс)
+port = 8123             # 8443 при secure = true
+secure = false
+user = "chsync"         # нужны права: SHOW, CREATE DATABASE/TABLE/VIEW/DICTIONARY/FUNCTION на target,
+                        # SELECT на system.*, system.zookeeper
+password_env = "CHSYNC_PASSWORD"   # пароль берётся из переменной окружения
+# password = ""                    # можно и так, но лучше через env
+timeout_sec = 120
+# ca_file = "/etc/ssl/certs/ch-ca.pem"
+# insecure_skip_verify = false
+# use_env_proxy = false            # не ходить через HTTPS_PROXY из окружения
+
+[source]
+# Откуда брать список БД и DDL. Достаточно одной реплики с каждого старого шарда:
+# объединение покажет расхождения между шардами (дрейф схемы на старом кластере).
+# Формат: "host", "host:port" или "https://host:8443"
+hosts = [
+  "ch-s1-r1.prod.local",
+  "ch-s2-r1.prod.local",
+  "ch-s3-r1.prod.local",
+]
+on_conflict = "error"   # DDL объекта различается между источниками: error -> BLOCKED, first -> взять с первого
+on_partial  = "warn"    # объект есть не на всех источниках: warn -> создать и предупредить, skip -> не создавать
+
+[target]
+hosts = [
+  "ch-s4-r1.prod.local",
+  "ch-s4-r2.prod.local",
+  "ch-s5-r1.prod.local",
+  "ch-s5-r2.prod.local",
+]
+expect_shards = 5       # сколько шардов должен видеть target в кластере (0 - не проверять)
+replicas_per_shard = 2  # сколько реплик должно быть у каждого НОВОГО шарда (0 - не проверять).
+                        # check сверяет: число хостов с одинаковым макросом shard в target.hosts,
+                        # число реплик шарда в remote_servers, internal_replication и макросы реплик.
+                        # 1 - шард без реплик: допустимо (Replicated-таблицы работают с одной репликой),
+                        # check предупредит об отсутствии отказоустойчивости.
+
+[filter]
+# Системные БД (system, INFORMATION_SCHEMA, information_schema) пропускаются всегда.
+exclude_databases  = ["test"]          # без учёта регистра
+exclude_name_regex = ["(?i)bms"]       # Go regexp: имя БД, имя объекта; (?i) - без учёта регистра
+exclude_objects    = []                # точечно: ["BD1.some_table"]
+include_databases  = []                # если не пусто - только эти БД (белый список)
+exclude_engines    = []                # например ["Kafka", "RabbitMQ", "S3Queue"]
+                                       # совет: на первом прогоне исключить потоковые движки и создать их
+                                       # вторым прогоном ПОСЛЕ раскатки remote_servers на старые хосты (RUNBOOK, шаг 7)
+cascade_exclude    = true              # исключать объекты, ссылающиеся на исключённые (MV/VIEW/Distributed над bms-таблицей)
+
+[ddl]
+# Сохранять UUID таблиц как на источнике. НЕ ВЫКЛЮЧАЙТЕ, если в ZK-путях есть {uuid}
+# (по умолчанию так и есть: /clickhouse/tables/{uuid}/{shard}) - иначе две реплики
+# нового шарда получат разные UUID и не будут реплицироваться друг с другом.
+preserve_uuid = true
+if_not_exists = true
+sync_functions = true                   # SQL UDF (CREATE FUNCTION) - создаются до таблиц
+
+# Replicated-таблицы, у которых ZK-путь БЕЗ макроса шарда (общий набор реплик на весь кластер):
+#   block  - не создавать, показать в плане (по умолчанию - решение должен принять DBA)
+#   skip   - пропустить
+#   create - создать: хост присоединится к общему набору реплик и скачает все данные
+global_replicated = "block"
+shard_macros = ["shard"]                # какие макросы делают ZK-путь уникальным для шарда
+check_zookeeper = true                  # проверять ZK-пути на target (коллизии, остатки старых реплик)
+
+# Показывать секреты в SHOW CREATE (словари/движки MySQL, PostgreSQL, S3 с паролями).
+# Требует display_secrets_in_show_and_select=1 в конфиге сервера-источника и права displaySecretsInShowAndSelect.
+display_secrets = false
+
+[ddl.settings]          # настройки, передаваемые с каждым CREATE на target
+# allow_suspicious_low_cardinality_types = 1
+# allow_experimental_object_type = 1
+# allow_deprecated_database_ordinary = 1
