@@ -17,17 +17,20 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"chsync/internal/xstrings"
 )
 
 // ConsoleOptions — настройки консольного обработчика.
 type ConsoleOptions struct {
 	Level    slog.Leveler // минимальный уровень (по умолчанию Info)
 	HideKeys []string     // атрибуты, которые в консоль не печатаются (например, "sql")
+	MaxValue int          // длиннее — обрезать (0 — не обрезать); полный текст остаётся в файловых журналах
 }
 
 // NewConsole — логгер для консоли: Info, а с verbose — Debug. Атрибут sql скрыт (он есть в apply.log).
 func NewConsole(w io.Writer, verbose bool) *slog.Logger {
-	return slog.New(NewConsoleHandler(w, ConsoleOptions{Level: level(verbose), HideKeys: []string{"sql"}}))
+	return slog.New(NewConsoleHandler(w, ConsoleOptions{Level: level(verbose), HideKeys: []string{"sql"}, MaxValue: 400}))
 }
 
 // NewFileHandler — обработчик для файла журнала: все уровни, формат key=value.
@@ -121,6 +124,9 @@ func (h *consoleHandler) appendAttr(buf []byte, prefix string, a slog.Attr) []by
 	buf = append(buf, a.Key...)
 	buf = append(buf, '=')
 	s := a.Value.String()
+	if n := h.opt.MaxValue; n > 0 && len(s) > n {
+		s = xstrings.Truncate(s, n)
+	}
 	if s == "" || strings.ContainsAny(s, " \t\n\"=") {
 		return strconv.AppendQuote(buf, s)
 	}

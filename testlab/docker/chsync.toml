@@ -9,6 +9,7 @@ output_dir = "./chsync-out"
 dry_run    = true                  # apply ничего не меняет без --execute
 
 [connection]
+protocol = "http"                 # http (HTTPS при secure = true) | native — см. chsync.native.toml
 port     = 8443                    # HTTPS-интерфейс ClickHouse
 secure   = true
 user     = "admin"

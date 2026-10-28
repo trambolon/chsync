@@ -66,7 +66,7 @@ func (c *checker) checkHosts(invs []*storage.Inventory) {
 			c.tgts = append(c.tgts, inv)
 		}
 		versions[inv.Version] = append(versions[inv.Version], inv.Name())
-		c.ok("%-8s %-30s version=%s hostName()=%s macros=%v", inv.Role, inv.Name(), inv.Version, inv.Hostname, inv.Macros)
+		c.ok("%-8s %-30s version=%s hostName()=%s macros=%v  (%s)", inv.Role, inv.Name(), inv.Version, inv.Hostname, inv.Macros, inv.Client.Endpoint())
 	}
 	if len(versions) > 1 {
 		for _, v := range slices.Sorted(maps.Keys(versions)) {
@@ -167,7 +167,7 @@ func (c *checker) checkTopology() {
 func (c *checker) checkZooKeeper(ctx context.Context) {
 	c.h("ZooKeeper/Keeper на target")
 	type cnt struct {
-		N uint64 `json:"n"`
+		N uint64 `ch:"n"`
 	}
 	for _, inv := range c.tgts {
 		if _, err := inv.Client.Select[cnt](ctx, "SELECT count() AS n FROM system.zookeeper WHERE path = '/'", nil); err != nil {

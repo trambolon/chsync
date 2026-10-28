@@ -154,11 +154,25 @@ func runCommand(ctx context.Context, cmd string, cfg *config.Config, opts *optio
 	}
 	defer run.Close()
 
-	hosts, err := selectHosts(cmd, cfg, opts.scope, active, run.ID)
+	// Журнал всех запросов к ClickHouse: файл queries.log — всегда, консоль — с -v.
+	qf, err := run.Create("queries.log")
+	if err != nil {
+		fmt.Fprintln(sio.Err, err)
+		return ExitError
+	}
+	defer qf.Close()
+	queryLog := logging.Tee(log.Handler(), logging.NewFileHandler(qf))
+
+	hosts, err := selectHosts(cmd, cfg, opts.scope, active, storage.ClientOptions{RunID: run.ID, Version: Version(), Log: queryLog})
 	if err != nil {
 		fmt.Fprintln(sio.Err, err)
 		return ExitConfig
 	}
+	defer func() {
+		for _, h := range hosts {
+			h.Client.Close()
+		}
+	}()
 	f := filter.New(cfg.Filter, xstrings.SplitList(opts.databases))
 	invOpt := storage.Options{
 		PreserveUUID:   cfg.DDL.PreserveUUID,
@@ -196,7 +210,7 @@ func runCommand(ctx context.Context, cmd string, cfg *config.Config, opts *optio
 			dry: dry, yes: opts.yes, allowBlocked: opts.allowBlocked, stopOnError: opts.stopOnError, verbose: opts.verbose, invOpt: invOpt,
 		})
 	}
-	log.Info("отчёт сохранён", "dir", run.Dir)
+	log.Info("отчёт сохранён", "dir", run.Dir, "queries", run.Path("queries.log"))
 	return code
 }
 
@@ -218,14 +232,14 @@ func activeTargets(cfg *config.Config, only string) (map[string]bool, error) {
 
 // selectHosts — какие хосты читать: plan/apply — все target (для соседей), check/diff — только активные;
 // diff --scope sources|targets — только одну из групп.
-func selectHosts(cmd string, cfg *config.Config, scope string, active map[string]bool, runID string) ([]storage.Host, error) {
+func selectHosts(cmd string, cfg *config.Config, scope string, active map[string]bool, co storage.ClientOptions) ([]storage.Host, error) {
 	var hosts []storage.Host
 	add := func(list []string, role storage.Role, onlyActive bool) error {
 		for _, h := range list {
 			if onlyActive && !active[h] {
 				continue
 			}
-			c, err := storage.New(h, cfg.Connection, runID)
+			c, err := storage.New(h, cfg.Connection, co)
 			if err != nil {
 				return err
 			}

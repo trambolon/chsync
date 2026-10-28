@@ -43,7 +43,7 @@ func TestTopoSortOrderAndCycle(t *testing.T) {
 // fakeInv — снимок хоста без сети. replicas — сколько реплик у его шарда в remote_servers (0 — кластера нет).
 func fakeInv(t *testing.T, name, shard, replica string, replicas int) *storage.Inventory {
 	t.Helper()
-	c, err := storage.New(name, config.Connection{Port: 8123}, "test")
+	c, err := storage.New(name, config.Connection{Protocol: config.ProtocolHTTP, Port: 8123}, storage.ClientOptions{RunID: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}

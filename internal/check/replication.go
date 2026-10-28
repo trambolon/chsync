@@ -19,11 +19,11 @@ var clusterQuerySettings = map[string]string{"skip_unavailable_shards": "0", "ma
 
 // replicaMacros — макросы одной реплики, прочитанные через clusterAllReplicas.
 type replicaMacros struct {
-	I uint32 `json:"i"` // shardNum() — порядковый номер реплики в system.clusters
-	P uint16 `json:"p"` // tcpPort() — НЕзащищённый native-порт (9000), даже если в remote_servers 9440
-	H string `json:"h"` // hostName()
-	S string `json:"s"` // getMacro('shard')
-	R string `json:"r"` // getMacro('replica')
+	I uint32 `ch:"i"` // shardNum() — порядковый номер реплики в system.clusters
+	P uint16 `ch:"p"` // tcpPort() — НЕзащищённый native-порт (9000), даже если в remote_servers 9440
+	H string `ch:"h"` // hostName()
+	S string `ch:"s"` // getMacro('shard')
+	R string `ch:"r"` // getMacro('replica')
 }
 
 // sameReplica — та ли это реплика, что в строке system.clusters: совпал порт (remote_servers без TLS)
@@ -200,7 +200,7 @@ func (c *checker) checkConnectivity(ctx context.Context) {
 	cl := c.cfg.Cluster
 	c.h("Связность внутри кластера (clusterAllReplicas с кредами кластера)")
 	type hostRow struct {
-		H string `json:"h"`
+		H string `ch:"h"`
 	}
 	for _, inv := range c.tgts {
 		rows, err := inv.Client.Select[hostRow](ctx, "SELECT hostName() AS h FROM clusterAllReplicas("+storage.QuoteString(cl)+", system.one)", clusterQuerySettings)

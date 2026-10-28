@@ -59,14 +59,14 @@ type DBInfo struct {
 
 // ClusterRow — строка system.clusters. InternalReplication = nil, если колонки нет (старые версии).
 type ClusterRow struct {
-	Cluster             string `json:"cluster"`
-	ShardNum            uint32 `json:"shard_num"`
-	ShardWeight         uint32 `json:"shard_weight"`
-	InternalReplication *uint8 `json:"internal_replication"`
-	ReplicaNum          uint32 `json:"replica_num"`
-	HostName            string `json:"host_name"`
-	Port                uint16 `json:"port"`
-	IsLocal             uint8  `json:"is_local"`
+	Cluster             string `ch:"cluster"`
+	ShardNum            uint32 `ch:"shard_num"`
+	ShardWeight         uint32 `ch:"shard_weight"`
+	InternalReplication *uint8 `ch:"internal_replication"`
+	ReplicaNum          uint32 `ch:"replica_num"`
+	HostName            string `ch:"host_name"`
+	Port                uint16 `ch:"port"`
+	IsLocal             uint8  `ch:"is_local"`
 }
 
 // Inventory — всё, что chsync знает о хосте: версия, макросы, БД, объекты, кластеры, окружение.
@@ -122,12 +122,12 @@ const sysDBs = "'system','INFORMATION_SCHEMA','information_schema','_temporary_a
 const maxParallel = 8
 
 type kv struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
+	Name  string `ch:"name"`
+	Value string `ch:"value"`
 }
 
 type nameRow struct {
-	Name string `json:"name"`
+	Name string `ch:"name"`
 }
 
 // Load читает снимок одного хоста. Ошибка критичных запросов кладётся в inv.Err,
@@ -179,12 +179,12 @@ func (inv *Inventory) load(ctx context.Context, opt Options) error {
 // loadDatabases — базы данных и их DDL (SHOW CREATE — только для БД, прошедших фильтр).
 func (inv *Inventory) loadDatabases(ctx context.Context, opt Options, show map[string]string) error {
 	type dbRow struct {
-		Name   string `json:"name"`
-		Engine string `json:"engine"`
-		UUID   string `json:"uuid"`
+		Name   string `ch:"name"`
+		Engine string `ch:"engine"`
+		UUID   string `ch:"uuid"`
 	}
 	type stmt struct {
-		Statement string `json:"statement"`
+		Statement string `ch:"statement"`
 	}
 	c := inv.Client
 	dbs, err := c.Select[dbRow](ctx, "SELECT name, engine, toString(uuid) AS uuid FROM system.databases WHERE name NOT IN ("+sysDBs+")", nil)
@@ -213,11 +213,11 @@ func (inv *Inventory) loadDatabases(ctx context.Context, opt Options, show map[s
 // loadObjects — все таблицы/вью/словари одним запросом.
 func (inv *Inventory) loadObjects(ctx context.Context, show map[string]string) error {
 	type tRow struct {
-		Database string `json:"database"`
-		Name     string `json:"name"`
-		Engine   string `json:"engine"`
-		UUID     string `json:"uuid"`
-		Create   string `json:"create"`
+		Database string `ch:"database"`
+		Name     string `ch:"name"`
+		Engine   string `ch:"engine"`
+		UUID     string `ch:"uuid"`
+		Create   string `ch:"create"`
 	}
 	rows, err := inv.Client.Select[tRow](ctx, "SELECT database, name, engine, toString(uuid) AS uuid, create_table_query AS create "+
 		"FROM system.tables WHERE is_temporary = 0 AND database NOT IN ("+sysDBs+")", show)

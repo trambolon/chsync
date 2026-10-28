@@ -7,8 +7,12 @@
 * DDL берётся с живых хостов-источников (`system.tables.create_table_query`), выполняется
   **напрямую** на каждом новом хосте (без `ON CLUSTER`), только `CREATE ... IF NOT EXISTS`.
 * Никогда не делает `DROP / ALTER / RENAME / INSERT`. Повторный запуск безопасен (идемпотентно).
-* Один статический бинарник на Go 1.27, работает через HTTP-интерфейс (8123/8443). Зависимость одна —
-  TOML-парсер (BurntSushi/toml v1.6.0), она лежит в `vendor/` (сборка без интернета).
+* Один статический бинарник на Go 1.27. С ClickHouse работает через официальный драйвер
+  [clickhouse-go v2](https://github.com/ClickHouse/clickhouse-go) (v2.50.0) — по HTTP(S) 8123/8443 или
+  native-протоколу 9000/9440 (`connection.protocol`). Все зависимости лежат в `vendor/` (сборка без интернета).
+* Каждый запрос к ClickHouse пишется в `queries.log` каталога запуска (хост, БД, длительность, строки, ошибка,
+  полный текст), с `-v` — ещё и в консоль. В `system.query_log` запросы chsync видны по `log_comment = 'chsync <запуск>'`
+  и `client_name` = chsync.
 
 Порядок работ по подключению шардов — в **RUNBOOK.md**. Здесь — только про утилиту.
 
@@ -21,7 +25,8 @@ internal/
               planapply.go  сценарий plan/apply: план по target, SQL-файлы, apply, verify, подтверждение
   config/     config.go     chsync.toml: типы, умолчания, Load/Finalize/Validate; chsync.example.toml (встроен)
   logging/    log.go        log/slog: компактный вывод в консоль + slog.TextHandler в apply.log (MultiHandler)
-  storage/    storage.go    HTTP-клиент ClickHouse: Exec, Select[T] (generic-метод, потоковый encoding/json/v2)
+  storage/    storage.go    клиент на clickhouse-go: HTTP или native, TLS, Exec/ExecIn, Select[T] (generic-метод,
+                            Scan в структуры по тегам ch:"..."), журнал запросов
               inventory.go  снимок хоста: БД, объекты, UDF, макросы, кластеры, политики, диски, настройки
               zookeeper.go  чтение детей узлов ZooKeeper/Keeper через system.zookeeper
   schema/     ddl.go        вид объекта, заголовок CREATE, UUID, нормализация DDL
@@ -168,7 +173,9 @@ sudo install -m 0755 chsync /usr/local/bin/chsync
 
 ### Запуск
 
-Запускать с jump/admin-хоста, у которого есть доступ к **HTTP-порту (8123/8443) всех 10 хостов**.
+Запускать с jump/admin-хоста, у которого есть доступ ко **всем 10 хостам** по выбранному протоколу:
+HTTPS 8443 (`protocol = "http"`, по умолчанию) или native TLS 9440 (`protocol = "native"` — тот же порт,
+что в `remote_servers`, отдельный порт открывать не нужно).
 
 ```bash
 mkdir -p ~/chsync && cd ~/chsync

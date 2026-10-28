@@ -16,11 +16,11 @@ func Verify(ctx context.Context, u *Union, tp *TargetPlan, opt storage.Options) 
 		return []string{"не удалось перечитать target: " + inv.Err.Error()}
 	}
 	type repRow struct {
-		Database   string `json:"database"`
-		Table      string `json:"table"`
-		ZKPath     string `json:"zookeeper_path"`
-		Replica    string `json:"replica_name"`
-		IsReadonly uint8  `json:"is_readonly"`
+		Database   string `ch:"database"`
+		Table      string `ch:"table"`
+		ZKPath     string `ch:"zookeeper_path"`
+		Replica    string `ch:"replica_name"`
+		IsReadonly uint8  `ch:"is_readonly"`
 	}
 	var issues []string
 	reps := map[schema.ObjKey]repRow{}

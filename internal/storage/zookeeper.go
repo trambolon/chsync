@@ -18,8 +18,8 @@ const zkBatch = 100
 // возвращается вторым значением (это не фатально: план просто предупредит).
 func ZKChildren(ctx context.Context, c *Client, paths []string) (map[string][]string, error) {
 	type row struct {
-		Path string `json:"path"`
-		Name string `json:"name"`
+		Path string `ch:"path"`
+		Name string `ch:"name"`
 	}
 	paths = xstrings.Uniq(paths)
 	out := make(map[string][]string, len(paths))

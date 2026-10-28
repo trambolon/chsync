@@ -1,4 +1,4 @@
-VERSION ?= 1.2.1
+VERSION ?= 1.3.0
 PKG      = chsync/internal/app
 LDFLAGS  = -s -w -X $(PKG).version=$(VERSION)
 GOFLAGS += -mod=vendor -trimpath

@@ -43,6 +43,27 @@ const (
 	GlobalCreate GlobalPolicy = "create" // подключить к общему набору реплик
 )
 
+// Protocol — протокол подключения к ClickHouse.
+type Protocol string
+
+const (
+	ProtocolHTTP   Protocol = "http"   // HTTP-интерфейс: 8123, с TLS — 8443
+	ProtocolNative Protocol = "native" // native TCP: 9000, с TLS — 9440
+)
+
+// DefaultPort — порт ClickHouse по умолчанию для протокола.
+func DefaultPort(p Protocol, secure bool) int {
+	switch {
+	case p == ProtocolNative && secure:
+		return 9440
+	case p == ProtocolNative:
+		return 9000
+	case secure:
+		return 8443
+	}
+	return 8123
+}
+
 // Config — содержимое chsync.toml.
 type Config struct {
 	Cluster   string `toml:"cluster"`    // имя кластера из <remote_servers>
@@ -56,17 +77,18 @@ type Config struct {
 	DDL        DDL        `toml:"ddl"`
 }
 
-// Connection — параметры подключения, общие для всех хостов (HTTP-интерфейс 8123/8443).
+// Connection — параметры подключения, общие для всех хостов.
 type Connection struct {
-	Port               int    `toml:"port"`
-	Secure             bool   `toml:"secure"`
-	User               string `toml:"user"`
-	Password           string `toml:"password"`
-	PasswordEnv        string `toml:"password_env"`
-	TimeoutSec         int    `toml:"timeout_sec"`
-	CAFile             string `toml:"ca_file"`
-	InsecureSkipVerify bool   `toml:"insecure_skip_verify"`
-	UseEnvProxy        bool   `toml:"use_env_proxy"`
+	Protocol           Protocol `toml:"protocol"` // http (по умолчанию) | native
+	Port               int      `toml:"port"`
+	Secure             bool     `toml:"secure"`
+	User               string   `toml:"user"`
+	Password           string   `toml:"password"`
+	PasswordEnv        string   `toml:"password_env"`
+	TimeoutSec         int      `toml:"timeout_sec"`
+	CAFile             string   `toml:"ca_file"`
+	InsecureSkipVerify bool     `toml:"insecure_skip_verify"`
+	UseEnvProxy        bool     `toml:"use_env_proxy"`
 }
 
 // Source — откуда берём DDL и как разрешаем расхождения между источниками.
@@ -156,11 +178,9 @@ func (c *Config) Finalize() {
 	c.Source.OnConflict = cmp.Or(c.Source.OnConflict, def.Source.OnConflict)
 	c.Source.OnPartial = cmp.Or(c.Source.OnPartial, def.Source.OnPartial)
 	c.DDL.GlobalReplicated = cmp.Or(c.DDL.GlobalReplicated, def.DDL.GlobalReplicated)
+	c.Connection.Protocol = cmp.Or(c.Connection.Protocol, ProtocolHTTP)
 	if c.Connection.Port == 0 {
-		c.Connection.Port = 8123
-		if c.Connection.Secure {
-			c.Connection.Port = 8443
-		}
+		c.Connection.Port = DefaultPort(c.Connection.Protocol, c.Connection.Secure)
 	}
 	if c.Connection.Password == "" && c.Connection.PasswordEnv != "" {
 		c.Connection.Password = os.Getenv(c.Connection.PasswordEnv)
@@ -214,6 +234,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Target.ExpectShards < 0 {
 		bad("target.expect_shards не может быть отрицательным")
+	}
+	errs = appendIfErr(errs, oneOf("connection.protocol", c.Connection.Protocol, ProtocolHTTP, ProtocolNative))
+	if cn := c.Connection; cn.Protocol == ProtocolNative && (cn.Port == 8123 || cn.Port == 8443) ||
+		cn.Protocol == ProtocolHTTP && (cn.Port == 9000 || cn.Port == 9440) {
+		bad("connection.port %d не подходит для protocol = %q (http: 8123/8443, native: 9000/9440)", cn.Port, cn.Protocol)
 	}
 	if p := c.Connection.Port; p < 1 || p > 65535 {
 		bad("connection.port %d вне диапазона 1..65535", p)

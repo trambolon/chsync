@@ -33,12 +33,9 @@ func Apply(ctx context.Context, cfg *config.Config, tp *TargetPlan, log *slog.Lo
 				res.Failures = append(res.Failures, fmt.Sprintf("прервано: %v", context.Cause(ctx)))
 				return res
 			}
-			s := cfg.DDL.SettingsParams()
-			if it.DB != "" {
-				s["database"] = it.DB // неквалифицированные имена в DDL — относительно своей БД
-			}
 			t0 := time.Now()
-			_, err := tp.Inv.Client.Exec(ctx, it.SQL, s)
+			// В контексте своей БД: неквалифицированные имена в DDL (VIEW ... FROM t) разрешаются относительно неё.
+			err := tp.Inv.Client.ExecIn(ctx, it.DB, it.SQL, cfg.DDL.SettingsParams())
 			dur := time.Since(t0).Round(time.Millisecond)
 			attrs := []any{"pass", pass, "kind", it.Kind, "object", it.Name, "dur", dur}
 			if err == nil {

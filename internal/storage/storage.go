@@ -1,6 +1,10 @@
-// Package storage — работа с ClickHouse: HTTP-клиент (8123/8443) и снимок схемы хоста (Inventory).
+// Package storage — работа с ClickHouse через официальный драйвер clickhouse-go v2 и снимок схемы хоста (Inventory).
 //
-// Драйверы не используются: HTTP прозрачен для аудита и работает через любые балансировщики/chproxy.
+// Протоколы: HTTP(S) — 8123/8443 (по умолчанию) или native — 9000/9440 (connection.protocol).
+// Результаты SELECT сканируются в структуры с тегами `ch:"колонка"` — без JSON и ручного разбора.
+// Каждый запрос пишется в журнал на уровне Debug (хост, БД, длительность, строки, ошибка, текст):
+// в файл queries.log каталога запуска — всегда, в консоль — с флагом -v.
+//
 // chsync выполняет только SELECT/SHOW и CREATE ... IF NOT EXISTS.
 package storage
 
@@ -8,35 +12,44 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json/jsontext"
-	json "encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+
 	"chsync/internal/config"
+	"chsync/internal/logging"
 	"chsync/internal/xstrings"
 )
 
-// maxBody — предел размера ответа сервера (DDL тысяч таблиц — десятки мегабайт).
-const maxBody = 256 << 20
+// ClientOptions — параметры клиента, не зависящие от хоста.
+type ClientOptions struct {
+	RunID   string       // метка запуска → system.query_log.log_comment
+	Version string       // версия chsync → system.query_log.client_name / http_user_agent
+	Log     *slog.Logger // журнал запросов (Debug); nil — не писать
+}
 
-// Client — клиент одного хоста ClickHouse поверх HTTP-интерфейса.
+// Client — подключение к одному хосту ClickHouse. Для каждой БД, в контексте которой выполняется DDL,
+// открывается своё подключение (Auth.Database): в HTTP-протоколе нет сессии, и USE между запросами не живёт.
 type Client struct {
-	name       string // хост так, как он записан в конфиге
-	base       string // http(s)://host:port/
-	user, pass string
-	hc         *http.Client
-	logComment string // попадает в system.query_log.log_comment — легко найти запросы chsync
+	name     string // хост так, как он записан в конфиге
+	addr     string // host:port
+	protocol clickhouse.Protocol
+	base     clickhouse.Options // шаблон опций; Auth.Database подставляется на каждую БД
+	log      *slog.Logger
+
+	mu    sync.Mutex
+	conns map[string]driver.Conn // БД ("" — по умолчанию) -> подключение
 }
 
 // Error — ошибка ClickHouse (или сети) с кодом исключения, если сервер его вернул.
@@ -61,38 +74,64 @@ func Code(err error) int {
 	return 0
 }
 
-// New создаёт клиент по строке из конфига: "host", "host:port" или "https://host:8443".
-// По умолчанию HTTPS_PROXY из окружения игнорируется — до прод-хостов ходим напрямую.
-func New(spec string, cc config.Connection, runID string) (*Client, error) {
-	scheme := "http"
-	if cc.Secure {
-		scheme = "https"
-	}
+// New создаёт клиент по строке из конфига: "host", "host:port", "https://host:8443" или "clickhouse://host:9440".
+// Подключение ленивое: сеть трогается при первом запросе. HTTPS_PROXY из окружения игнорируется,
+// если не задано connection.use_env_proxy — до прод-хостов ходим напрямую.
+func New(spec string, cc config.Connection, o ClientOptions) (*Client, error) {
+	proto, secure, port := cc.Protocol, cc.Secure, cc.Port
 	hostport := spec
-	if strings.HasPrefix(spec, "http://") || strings.HasPrefix(spec, "https://") {
-		u, err := url.Parse(spec)
-		if err != nil {
-			return nil, fmt.Errorf("хост %q: %w", spec, err)
+	if scheme, rest, ok := strings.Cut(spec, "://"); ok {
+		switch scheme {
+		case "http", "https":
+			proto, secure = config.ProtocolHTTP, scheme == "https"
+		case "clickhouse", "tcp":
+			proto = config.ProtocolNative
+		case "clickhouses":
+			proto, secure = config.ProtocolNative, true
+		default:
+			return nil, fmt.Errorf("хост %q: неизвестная схема %s://", spec, scheme)
 		}
-		scheme, hostport = u.Scheme, u.Host
+		hostport = strings.TrimSuffix(rest, "/")
+		if proto != cc.Protocol || secure != cc.Secure { // порт из конфига относится к другому протоколу
+			port = config.DefaultPort(proto, secure)
+		}
 	}
-	host, port := hostport, cc.Port
+	host := hostport
 	if h, p, err := net.SplitHostPort(hostport); err == nil {
 		host = h
 		if port, err = strconv.Atoi(p); err != nil {
 			return nil, fmt.Errorf("хост %q: неверный порт", spec)
 		}
 	}
-	tr := &http.Transport{
-		MaxIdleConnsPerHost: 4,
-		IdleConnTimeout:     60 * time.Second,
-		DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+
+	opt := clickhouse.Options{
+		Protocol: clickhouse.Native,
+		Addr:     []string{net.JoinHostPort(host, strconv.Itoa(port))},
+		Auth:     clickhouse.Auth{Username: cc.User, Password: cc.Password},
+		ClientInfo: clickhouse.ClientInfo{Products: []struct{ Name, Version string }{
+			{Name: "chsync", Version: o.Version},
+		}},
+		Settings:        clickhouse.Settings{"log_comment": "chsync " + o.RunID},
+		DialTimeout:     10 * time.Second,
+		ReadTimeout:     time.Duration(cc.TimeoutSec) * time.Second,
+		MaxOpenConns:    4,
+		MaxIdleConns:    2,
+		ConnMaxLifetime: 10 * time.Minute,
 	}
-	if cc.UseEnvProxy {
-		tr.Proxy = http.ProxyFromEnvironment
+	if proto == config.ProtocolHTTP {
+		opt.Protocol = clickhouse.HTTP
+		useEnv := cc.UseEnvProxy
+		opt.TransportFunc = func(t *http.Transport) (http.RoundTripper, error) {
+			if !useEnv {
+				t.Proxy = nil // драйвер по умолчанию берёт HTTPS_PROXY из окружения
+			}
+			return t, nil
+		}
+	} else {
+		opt.Compression = &clickhouse.Compression{Method: clickhouse.CompressionLZ4}
 	}
-	if scheme == "https" {
-		tc := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: cc.InsecureSkipVerify} //nolint:gosec // явная опция конфига
+	if secure {
+		tc := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: cc.InsecureSkipVerify, ServerName: host} //nolint:gosec // явная опция конфига
 		if cc.CAFile != "" {
 			pem, err := os.ReadFile(cc.CAFile)
 			if err != nil {
@@ -103,102 +142,120 @@ func New(spec string, cc config.Connection, runID string) (*Client, error) {
 				return nil, fmt.Errorf("ca_file %s: не найдено сертификатов", cc.CAFile)
 			}
 		}
-		tr.TLSClientConfig = tc
+		opt.TLS = tc
 	}
-	return &Client{
-		name:       spec,
-		base:       fmt.Sprintf("%s://%s/", scheme, net.JoinHostPort(host, strconv.Itoa(port))),
-		user:       cc.User,
-		pass:       cc.Password,
-		logComment: "chsync " + runID,
-		hc:         &http.Client{Transport: tr, Timeout: time.Duration(cc.TimeoutSec) * time.Second},
-	}, nil
+	log := o.Log
+	if log == nil {
+		log = logging.Discard()
+	}
+	return &Client{name: spec, addr: opt.Addr[0], protocol: opt.Protocol, base: opt, log: log, conns: map[string]driver.Conn{}}, nil
 }
 
 // Name — хост так, как он записан в конфиге.
 func (c *Client) Name() string { return c.name }
 
-var codeRe = regexp.MustCompile(`Code: (\d+)`)
-
-// do отправляет запрос и возвращает ответ со статусом 200 (тело закрывает вызывающий).
-// wait_end_of_query=1 — чтобы ошибка посреди выполнения пришла HTTP-статусом, а не обрывком тела.
-func (c *Client) do(ctx context.Context, query string, settings map[string]string) (*http.Response, error) {
-	v := url.Values{}
-	v.Set("wait_end_of_query", "1")
-	v.Set("output_format_json_quote_64bit_integers", "0")
-	v.Set("log_comment", c.logComment)
-	for k, val := range settings {
-		v.Set(k, val)
+// Close закрывает все подключения клиента.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var errs []error
+	for db, conn := range c.conns {
+		errs = append(errs, conn.Close())
+		delete(c.conns, db)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"?"+v.Encode(), strings.NewReader(query))
-	if err != nil {
-		return nil, &Error{Host: c.name, Message: err.Error()}
-	}
-	req.Header.Set("X-ClickHouse-User", c.user)
-	if c.pass != "" {
-		req.Header.Set("X-ClickHouse-Key", c.pass) // пароль в заголовке, не в URL
-	}
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return nil, &Error{Host: c.name, Message: err.Error()}
-	}
-	if resp.StatusCode == http.StatusOK {
-		return resp, nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	e := &Error{Host: c.name, Message: xstrings.Truncate(strings.TrimSpace(string(body)), 2000)}
-	if h := resp.Header.Get("X-ClickHouse-Exception-Code"); h != "" {
-		e.Code, _ = strconv.Atoi(h)
-	} else if m := codeRe.FindStringSubmatch(e.Message); m != nil {
-		e.Code, _ = strconv.Atoi(m[1])
-	}
-	if e.Message == "" {
-		e.Message = resp.Status
-	}
-	return nil, e
+	return errors.Join(errs...)
 }
 
-// Exec выполняет один запрос (DDL) и возвращает тело ответа. settings уходят параметрами URL.
-func (c *Client) Exec(ctx context.Context, query string, settings map[string]string) ([]byte, error) {
-	resp, err := c.do(ctx, query, settings)
-	if err != nil {
-		return nil, err
+// conn — подключение с текущей БД db ("" — БД пользователя по умолчанию).
+func (c *Client) conn(db string) (driver.Conn, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if conn, ok := c.conns[db]; ok {
+		return conn, nil
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	opt := c.base
+	opt.Auth.Database = db
+	opt.Settings = maps.Clone(c.base.Settings)
+	conn, err := clickhouse.Open(&opt)
 	if err != nil {
-		return nil, &Error{Host: c.name, Message: "read body: " + err.Error()}
+		return nil, c.wrap(err)
 	}
-	return body, nil
+	c.conns[db] = conn
+	return conn, nil
 }
 
-// Select выполняет SELECT/SHOW в формате JSONEachRow и потоково декодирует каждую строку в T
-// (encoding/json/v2: без промежуточного буфера на весь ответ).
-// Невалидный UTF-8 в строках заменяется на U+FFFD — так же вёл себя encoding/json v1.
+// queryCtx добавляет к контексту настройки уровня запроса.
+func queryCtx(ctx context.Context, settings map[string]string) context.Context {
+	if len(settings) == 0 {
+		return ctx
+	}
+	s := make(clickhouse.Settings, len(settings))
+	for k, v := range settings {
+		s[k] = v
+	}
+	return clickhouse.Context(ctx, clickhouse.WithSettings(s))
+}
+
+// trace пишет запрос в журнал: хост, БД, длительность, строки, ошибка и полный текст.
+func (c *Client) trace(db, query string, settings map[string]string, start time.Time, rows int, err error) {
+	attrs := []any{"host", c.name, "dur", time.Since(start).Round(time.Millisecond)}
+	if db != "" {
+		attrs = append(attrs, "db", db)
+	}
+	if rows >= 0 {
+		attrs = append(attrs, "rows", rows)
+	}
+	if len(settings) > 0 {
+		attrs = append(attrs, "settings", fmt.Sprint(settings))
+	}
+	if err != nil {
+		attrs = append(attrs, "err", err.Error())
+	}
+	c.log.Debug("query", append(attrs, "query", strings.Join(strings.Fields(query), " "))...)
+}
+
+// wrap превращает ошибку драйвера в *Error с кодом исключения ClickHouse.
+func (c *Client) wrap(err error) error {
+	if err == nil {
+		return nil
+	}
+	if e, ok := errors.AsType[*clickhouse.Exception](err); ok {
+		return &Error{Host: c.name, Code: int(e.Code), Message: xstrings.Truncate(strings.TrimSpace(e.Message), 2000)}
+	}
+	return &Error{Host: c.name, Message: xstrings.Truncate(err.Error(), 2000)}
+}
+
+// Exec выполняет запрос без результата (DDL) в контексте БД пользователя по умолчанию.
+func (c *Client) Exec(ctx context.Context, query string, settings map[string]string) error {
+	return c.ExecIn(ctx, "", query, settings)
+}
+
+// ExecIn выполняет запрос в контексте БД db: неквалифицированные имена в DDL (VIEW ... FROM t)
+// разрешаются относительно неё.
+func (c *Client) ExecIn(ctx context.Context, db, query string, settings map[string]string) error {
+	start := time.Now()
+	conn, err := c.conn(db)
+	if err == nil {
+		err = c.wrap(conn.Exec(queryCtx(ctx, settings), query))
+	}
+	c.trace(db, query, settings, start, -1, err)
+	return err
+}
+
+// Select выполняет SELECT/SHOW и сканирует строки в []T. Поля T сопоставляются с колонками по тегу `ch:"имя"`;
+// типы должны соответствовать колонкам (UInt32 → uint32, String → string, Nullable(T) → *T).
 func (c *Client) Select[T any](ctx context.Context, query string, settings map[string]string) ([]T, error) {
-	s := maps.Clone(settings)
-	if s == nil {
-		s = map[string]string{}
+	start := time.Now()
+	var out []T
+	conn, err := c.conn("")
+	if err == nil {
+		err = c.wrap(conn.Select(queryCtx(ctx, settings), &out, query))
 	}
-	s["default_format"] = "JSONEachRow"
-	resp, err := c.do(ctx, query, s)
+	c.trace("", query, settings, start, len(out), err)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	dec := jsontext.NewDecoder(io.LimitReader(resp.Body, maxBody), jsontext.AllowInvalidUTF8(true))
-	var out []T
-	for {
-		var row T
-		switch err := json.UnmarshalDecode(dec, &row); {
-		case errors.Is(err, io.EOF):
-			return out, nil
-		case err != nil:
-			return nil, &Error{Host: c.name, Message: "decode JSONEachRow: " + xstrings.Truncate(err.Error(), 300)}
-		}
-		out = append(out, row)
-	}
+	return out, nil
 }
 
 var (
@@ -211,3 +268,15 @@ func QuoteIdent(s string) string { return "`" + identEscaper.Replace(s) + "`" }
 
 // QuoteString экранирует строковый литерал: it's -> 'it\'s'.
 func QuoteString(s string) string { return "'" + stringEscaper.Replace(s) + "'" }
+
+// Endpoint — «протокол://адрес» подключения (для check и отчётов): http+tls://host:8443, native+tls://host:9440.
+func (c *Client) Endpoint() string {
+	p := "native"
+	if c.protocol == clickhouse.HTTP {
+		p = "http"
+	}
+	if c.base.TLS != nil {
+		p += "+tls"
+	}
+	return p + "://" + c.addr
+}

@@ -12,9 +12,10 @@ output_dir = "./chsync-out"
 # false - apply выполняет DDL (с подтверждением, если нет --yes)
 dry_run = true
 
-[connection]            # общие параметры для всех хостов (HTTP-интерфейс)
-port = 8123             # 8443 при secure = true
-secure = false
+[connection]            # общие параметры для всех хостов
+protocol = "http"       # http — HTTP-интерфейс (8123, с TLS 8443) | native — native-протокол (9000, с TLS 9440)
+port = 8123             # по умолчанию: http 8123/8443, native 9000/9440 (зависит от secure)
+secure = false          # TLS; на проде с портами 8443/9440 — true
 user = "chsync"         # права: на всех хостах SHOW, SHOW USERS, SHOW ROLES, SELECT ON system.*;
                         # на target ещё SELECT, INSERT (для MV), CREATE DATABASE/TABLE/VIEW/DICTIONARY/FUNCTION,
                         # REMOTE. Подробно — README, раздел «Запуск»

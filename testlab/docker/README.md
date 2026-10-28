@@ -55,6 +55,15 @@
 `./lab.sh chsync …` = `docker compose run --rm chsync …`: бинарник берётся из `../../dist/chsync-linux-amd64`
 (другой путь — переменная `CHSYNC_BIN`), отчёты пишутся в `./chsync-out`.
 
+**По native-протоколу 9440** (тот же порт, что в `remote_servers`; конфиг — `chsync.native.toml`):
+
+```bash
+./lab.sh chsync check -c chsync.native.toml
+./lab.sh chsync apply -c chsync.native.toml --execute --yes
+```
+
+Все запросы chsync к ClickHouse — в `chsync-out/<запуск>/queries.log`; с `-v` они печатаются и в консоль.
+
 **С хоста, через проброшенные порты** (конфиг — `chsync.host.toml`, сертификат содержит SAN `localhost`):
 
 ```bash
