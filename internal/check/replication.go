@@ -20,9 +20,21 @@ var clusterQuerySettings = map[string]string{"skip_unavailable_shards": "0", "ma
 // replicaMacros — макросы одной реплики, прочитанные через clusterAllReplicas.
 type replicaMacros struct {
 	I uint32 `json:"i"` // shardNum() — порядковый номер реплики в system.clusters
-	P uint16 `json:"p"` // tcpPort()
+	P uint16 `json:"p"` // tcpPort() — НЕзащищённый native-порт (9000), даже если в remote_servers 9440
+	H string `json:"h"` // hostName()
 	S string `json:"s"` // getMacro('shard')
 	R string `json:"r"` // getMacro('replica')
+}
+
+// sameReplica — та ли это реплика, что в строке system.clusters: совпал порт (remote_servers без TLS)
+// или имя хоста (с учётом FQDN: ch-s1-r1 ↔ ch-s1-r1.prod.local). При remote_servers на 9440
+// порт не совпадает никогда — tcpPort() возвращает tcp_port, а не tcp_port_secure.
+func sameReplica(r storage.ClusterRow, x replicaMacros) bool {
+	if r.Port == x.P {
+		return true
+	}
+	a, b := strings.ToLower(r.HostName), strings.ToLower(x.H)
+	return a != "" && b != "" && (a == b || strings.HasPrefix(a, b+".") || strings.HasPrefix(b, a+"."))
 }
 
 // checkReplication — контроль репликации шардов. Сводит вместе то, что определяет репликацию:
@@ -128,10 +140,10 @@ func (c *checker) checkReplication(ctx context.Context) {
 
 // readReplicaMacros — макросы каждой реплики кластера: индекс строки rows -> макросы.
 // В clusterAllReplicas каждая реплика — отдельный «шард», shardNum() = её порядковый номер
-// в system.clusters; дополнительно сверяем порт. При любом сомнении возвращает пустую map.
+// в system.clusters; дополнительно сверяем порт или имя хоста. При любом сомнении возвращает пустую map.
 func (c *checker) readReplicaMacros(ctx context.Context, ref *storage.Inventory, rows []storage.ClusterRow) map[int]replicaMacros {
 	macroOf := map[int]replicaMacros{}
-	res, err := ref.Client.Select[replicaMacros](ctx, "SELECT shardNum() AS i, tcpPort() AS p, getMacro('shard') AS s, getMacro('replica') AS r "+
+	res, err := ref.Client.Select[replicaMacros](ctx, "SELECT shardNum() AS i, tcpPort() AS p, hostName() AS h, getMacro('shard') AS s, getMacro('replica') AS r "+
 		"FROM clusterAllReplicas("+storage.QuoteString(c.cfg.Cluster)+", system.one)", clusterQuerySettings)
 	if err != nil {
 		c.warn("макросы реплик не прочитаны (%s) — сверка remote_servers ↔ макросы пропущена", truncate(err.Error(), 200))
@@ -139,8 +151,8 @@ func (c *checker) readReplicaMacros(ctx context.Context, ref *storage.Inventory,
 	}
 	for _, x := range res {
 		i := int(x.I) - 1
-		if i < 0 || i >= len(rows) || rows[i].Port != x.P {
-			c.warn("порядок реплик в clusterAllReplicas не совпал с system.clusters — сверка макросов пропущена")
+		if i < 0 || i >= len(rows) || !sameReplica(rows[i], x) {
+			c.warn("реплику %s (hostName()=%s) не удалось сопоставить со строкой system.clusters — сверка макросов пропущена", fmt.Sprint(x.I), x.H)
 			return map[int]replicaMacros{}
 		}
 		macroOf[i] = x

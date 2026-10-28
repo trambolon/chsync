@@ -1,0 +1,44 @@
+<!--
+  Порты и TLS — одинаково на всех 6 узлах (как на проде):
+    8443 — HTTPS (chsync, клиенты)        9440 — native TLS (remote_servers, clickhouse-client с ключом secure)
+    8123 / 9000 — без TLS, только внутри сети compose (healthcheck, seed); на хост не пробрасываются
+    9009 — interserver (репликация)
+  Сертификат один на все узлы (SAN: имена всех узлов + localhost), выпущен своим CA: ./lab.sh certs
+-->
+<clickhouse>
+    <listen_host>0.0.0.0</listen_host>
+    <listen_try>1</listen_try>
+
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+    <https_port>8443</https_port>
+    <tcp_port_secure>9440</tcp_port_secure>
+    <interserver_http_port>9009</interserver_http_port>
+
+    <openSSL>
+        <server>
+            <certificateFile>/etc/clickhouse-server/certs/server.crt</certificateFile>
+            <privateKeyFile>/etc/clickhouse-server/certs/server.key</privateKeyFile>
+            <verificationMode>none</verificationMode>
+            <loadDefaultCAFile>false</loadDefaultCAFile>
+            <cacheSessions>true</cacheSessions>
+            <disableProtocols>sslv2,sslv3,tlsv1,tlsv1_1</disableProtocols>
+            <preferServerCiphers>true</preferServerCiphers>
+        </server>
+        <!-- Исходящие TLS-соединения (Distributed → 9440 других узлов): доверяем только своему CA -->
+        <client>
+            <caConfig>/etc/clickhouse-server/certs/ca.crt</caConfig>
+            <loadDefaultCAFile>false</loadDefaultCAFile>
+            <verificationMode>strict</verificationMode>
+            <disableProtocols>sslv2,sslv3,tlsv1,tlsv1_1</disableProtocols>
+            <invalidCertificateHandler>
+                <name>RejectCertificateHandler</name>
+            </invalidCertificateHandler>
+        </client>
+    </openSSL>
+
+    <logger>
+        <level>warning</level>
+        <console>1</console>
+    </logger>
+</clickhouse>

@@ -204,6 +204,17 @@ apply подскажет). После работ пользователя мож
 
 ## Репетиция на стенде (рекомендуется перед продом)
 
+**Docker-стенд** — `testlab/docker/`: 3 ClickHouse Keeper + 6 ClickHouse 26.3.2.3 (2 старых шарда + новый,
+по 2 реплики), HTTPS 8443 и native TLS 9440 со своим CA, пользователь admin. Подробно — `testlab/docker/README.md`:
+
+```bash
+cd testlab/docker
+./lab.sh up && ./lab.sh seed
+./lab.sh chsync check && ./lab.sh chsync plan
+```
+
+**Без Docker** — `testlab/lab.sh` поднимает те же процессы прямо на машине (нужен только бинарь clickhouse):
+
 `testlab/lab.sh` поднимает на одной машине Keeper + 6 инстансов ClickHouse (2 старых шарда × 2
 реплики + новый шард × 2) с тестовой схемой: `{uuid}`-пути, `{database}/{table}`-пути, дефолтные
 аргументы Replicated, MV c TO и с inner-движком, VIEW над VIEW, словарь + `dictGet` в DEFAULT,

@@ -1,0 +1,37 @@
+# chsync для docker-стенда: запуск ВНУТРИ сети compose, по HTTPS 8443 — как на проде.
+#   ./lab.sh chsync check
+#   ./lab.sh chsync plan
+#   ./lab.sh chsync apply --execute --yes
+#   ./lab.sh chsync diff
+
+cluster    = "lab_cluster"
+output_dir = "./chsync-out"
+dry_run    = true                  # apply ничего не меняет без --execute
+
+[connection]
+port     = 8443                    # HTTPS-интерфейс ClickHouse
+secure   = true
+user     = "admin"
+password = "123456qwe"             # на проде вместо этого: password_env = "CHSYNC_PASSWORD"
+ca_file  = "./certs/ca.crt"        # CA стенда (./lab.sh certs); проверка сертификата включена
+timeout_sec = 120
+
+[source]                           # по одной реплике с каждого старого шарда
+hosts = ["ch-s1-r1", "ch-s2-r1"]
+on_conflict = "error"
+on_partial  = "warn"
+
+[target]                           # обе реплики нового шарда 03
+hosts = ["ch-s3-r1", "ch-s3-r2"]
+expect_shards      = 3
+replicas_per_shard = 2
+
+[filter]
+exclude_databases  = ["test"]
+exclude_name_regex = ["(?i)bms"]
+cascade_exclude    = true
+
+[ddl]
+preserve_uuid     = true
+global_replicated = "block"        # shop.products_p (путь без {shard}) будет BLOCKED — смените на "create"
+check_zookeeper   = true

@@ -1,0 +1,5 @@
+certs/
+chsync-out/
+config/cluster/old/remote_servers.xml
+config/cluster/new/remote_servers.xml
+.env

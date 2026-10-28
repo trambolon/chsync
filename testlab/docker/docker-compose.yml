@@ -1,0 +1,146 @@
+# Стенд для chsync: 3 clickhouse-keeper + 6 ClickHouse (2 старых шарда × 2 реплики + 1 новый шард × 2 реплики).
+#
+#   старый кластер:  ch-s1-r1, ch-s1-r2 (shard 01)   ch-s2-r1, ch-s2-r2 (shard 02)
+#   новый шард:      ch-s3-r1, ch-s3-r2 (shard 03)   ← target для chsync
+#
+# Внутри сети compose у всех одинаковые порты, как на проде: HTTPS 8443, native TLS 9440.
+# На хост проброшены разные порты (см. таблицу в README.md):
+#   HTTPS:      18441..18446  →  8443
+#   native TLS: 19441..19446  →  9440
+#   keeper:     19181..19183  →  9181
+#
+# Запуск: ./lab.sh up && ./lab.sh seed   (подробно — README.md)
+
+name: chsync-lab
+
+x-keeper: &keeper
+  image: clickhouse/clickhouse-keeper:${CH_VERSION:-26.3.2.3}
+  restart: unless-stopped
+  environment: &keeper-env
+    CLICKHOUSE_DATA_DIR: /var/lib/clickhouse-keeper
+  ulimits:
+    nofile:   # рекомендация ClickHouse; если Docker не даёт поднять лимит — CH_NOFILE=20000 в .env
+      soft: ${CH_NOFILE:-262144}
+      hard: ${CH_NOFILE:-262144}
+  healthcheck:
+    # four-letter word: живой keeper отвечает imok
+    test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9181 && printf ruok >&3 && { read -t 3 r <&3; [ \"$$r\" = imok ]; }"]
+    interval: 3s
+    timeout: 5s
+    retries: 40
+
+x-clickhouse: &clickhouse
+  image: clickhouse/clickhouse-server:${CH_VERSION:-26.3.2.3}
+  restart: unless-stopped
+  depends_on:
+    keeper1: { condition: service_healthy }
+    keeper2: { condition: service_healthy }
+    keeper3: { condition: service_healthy }
+  ulimits:
+    nofile:   # рекомендация ClickHouse; если Docker не даёт поднять лимит — CH_NOFILE=20000 в .env
+      soft: ${CH_NOFILE:-262144}
+      hard: ${CH_NOFILE:-262144}
+  cap_add: [SYS_NICE, IPC_LOCK]
+  healthcheck:
+    test: ["CMD", "clickhouse", "client", "--query", "SELECT 1"]
+    interval: 3s
+    timeout: 5s
+    retries: 60
+
+# Общие тома ClickHouse-узлов. remote_servers подключается отдельно (conf.d) — у старых и новых узлов он разный.
+x-ch-volumes:
+  - &cfg ./config/server:/etc/clickhouse-server/config.d:ro
+  - &users ./config/users:/etc/clickhouse-server/users.d:ro
+  - &certs ./certs:/etc/clickhouse-server/certs:ro
+  - &old ./config/cluster/old:/etc/clickhouse-server/conf.d:ro
+  - &new ./config/cluster/new:/etc/clickhouse-server/conf.d:ro
+
+services:
+  # ─────────────── ClickHouse Keeper: кворум из 3 узлов ───────────────
+  keeper1:
+    <<: *keeper
+    hostname: keeper1
+    environment: { <<: *keeper-env, KEEPER_SERVER_ID: "1" }
+    volumes: [./config/keeper/keeper.xml:/etc/clickhouse-keeper/keeper_config.xml:ro, keeper1:/var/lib/clickhouse-keeper]
+    ports: ["19181:9181"]
+  keeper2:
+    <<: *keeper
+    hostname: keeper2
+    environment: { <<: *keeper-env, KEEPER_SERVER_ID: "2" }
+    volumes: [./config/keeper/keeper.xml:/etc/clickhouse-keeper/keeper_config.xml:ro, keeper2:/var/lib/clickhouse-keeper]
+    ports: ["19182:9181"]
+  keeper3:
+    <<: *keeper
+    hostname: keeper3
+    environment: { <<: *keeper-env, KEEPER_SERVER_ID: "3" }
+    volumes: [./config/keeper/keeper.xml:/etc/clickhouse-keeper/keeper_config.xml:ro, keeper3:/var/lib/clickhouse-keeper]
+    ports: ["19183:9181"]
+
+  # ─────────────── Старый кластер: шард 01 ───────────────
+  ch-s1-r1:
+    <<: *clickhouse
+    hostname: ch-s1-r1
+    environment: { CLICKHOUSE_SKIP_USER_SETUP: "1", CH_SHARD: "01", CH_REPLICA: ch-s1-r1 }
+    volumes: [*cfg, *users, *certs, *old, ch-s1-r1:/var/lib/clickhouse]
+    ports: ["18441:8443", "19441:9440"]
+  ch-s1-r2:
+    <<: *clickhouse
+    hostname: ch-s1-r2
+    environment: { CLICKHOUSE_SKIP_USER_SETUP: "1", CH_SHARD: "01", CH_REPLICA: ch-s1-r2 }
+    volumes: [*cfg, *users, *certs, *old, ch-s1-r2:/var/lib/clickhouse]
+    ports: ["18442:8443", "19442:9440"]
+
+  # ─────────────── Старый кластер: шард 02 ───────────────
+  ch-s2-r1:
+    <<: *clickhouse
+    hostname: ch-s2-r1
+    environment: { CLICKHOUSE_SKIP_USER_SETUP: "1", CH_SHARD: "02", CH_REPLICA: ch-s2-r1 }
+    volumes: [*cfg, *users, *certs, *old, ch-s2-r1:/var/lib/clickhouse]
+    ports: ["18443:8443", "19443:9440"]
+  ch-s2-r2:
+    <<: *clickhouse
+    hostname: ch-s2-r2
+    environment: { CLICKHOUSE_SKIP_USER_SETUP: "1", CH_SHARD: "02", CH_REPLICA: ch-s2-r2 }
+    volumes: [*cfg, *users, *certs, *old, ch-s2-r2:/var/lib/clickhouse]
+    ports: ["18444:8443", "19444:9440"]
+
+  # ─────────────── Новый шард 03 (target для chsync) ───────────────
+  ch-s3-r1:
+    <<: *clickhouse
+    hostname: ch-s3-r1
+    environment: { CLICKHOUSE_SKIP_USER_SETUP: "1", CH_SHARD: "03", CH_REPLICA: ch-s3-r1 }
+    volumes: [*cfg, *users, *certs, *new, ch-s3-r1:/var/lib/clickhouse]
+    ports: ["18445:8443", "19445:9440"]
+  ch-s3-r2:
+    <<: *clickhouse
+    hostname: ch-s3-r2
+    environment: { CLICKHOUSE_SKIP_USER_SETUP: "1", CH_SHARD: "03", CH_REPLICA: ch-s3-r2 }
+    volumes: [*cfg, *users, *certs, *new, ch-s3-r2:/var/lib/clickhouse]
+    ports: ["18446:8443", "19446:9440"]
+
+  # ─────────────── chsync внутри сети compose (по https 8443, как на проде) ───────────────
+  # ./lab.sh chsync check   ==   docker compose run --rm chsync check
+  chsync:
+    image: clickhouse/clickhouse-server:${CH_VERSION:-26.3.2.3}   # нужен любой Linux; берём уже скачанный образ
+    profiles: [tools]
+    entrypoint: ["/usr/local/bin/chsync"]
+    working_dir: /work
+    volumes:
+      - ${CHSYNC_BIN:-../../dist/chsync-linux-amd64}:/usr/local/bin/chsync:ro
+      - ./chsync.toml:/work/chsync.toml:ro
+      - ./certs/ca.crt:/work/certs/ca.crt:ro
+      - ./chsync-out:/work/chsync-out
+    depends_on:
+      ch-s3-r1: { condition: service_healthy }
+      ch-s3-r2: { condition: service_healthy }
+
+volumes:
+  keeper1: {}
+  keeper2: {}
+  keeper3: {}
+  ch-s1-r1: {}
+  ch-s1-r2: {}
+  ch-s2-r1: {}
+  ch-s2-r2: {}
+  ch-s3-r1: {}
+  ch-s3-r2: {}

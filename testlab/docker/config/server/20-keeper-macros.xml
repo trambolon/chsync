@@ -1,0 +1,42 @@
+<!--
+  Keeper, макросы и пути Replicated-таблиц — как в вашей прод-схеме:
+  ReplicatedMergeTree создаётся БЕЗ аргументов, путь берётся из default_replica_path.
+  Макросы shard / replica задаются переменными окружения CH_SHARD / CH_REPLICA в docker-compose.yml.
+-->
+<clickhouse>
+    <zookeeper>
+        <node><host>keeper1</host><port>9181</port></node>
+        <node><host>keeper2</host><port>9181</port></node>
+        <node><host>keeper3</host><port>9181</port></node>
+        <session_timeout_ms>30000</session_timeout_ms>
+    </zookeeper>
+
+    <macros>
+        <cluster>lab_cluster</cluster>
+        <shard from_env="CH_SHARD"/>
+        <replica from_env="CH_REPLICA"/>
+    </macros>
+
+    <default_replica_path>/clickhouse/tables/{shard}/{database}/{table}</default_replica_path>
+    <default_replica_name>{replica}</default_replica_name>
+
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+    </distributed_ddl>
+
+    <!-- Для таблиц с storage_policy = 'tiered' (chsync проверяет, что политика есть на target) -->
+    <storage_configuration>
+        <disks>
+            <cold><path>/var/lib/clickhouse/disks/cold/</path></cold>
+        </disks>
+        <policies>
+            <tiered>
+                <volumes>
+                    <hot><disk>default</disk></hot>
+                    <cold><disk>cold</disk></cold>
+                </volumes>
+                <move_factor>0.1</move_factor>
+            </tiered>
+        </policies>
+    </storage_configuration>
+</clickhouse>
