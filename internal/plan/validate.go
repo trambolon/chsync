@@ -16,6 +16,10 @@ func (p *Planner) validate(so *SrcObj, t *storage.Inventory, it *Item, rt replTa
 	it.Action = ACreate
 	block := func(r string) { it.Action, it.Reason = ABlocked, r }
 
+	if rt.ri != nil && p.cfg.NoKeeper() {
+		block(noKeeperReason)
+		return
+	}
 	if rt.ri != nil && !p.validateReplicated(so, t, it, rt, zk) {
 		return
 	}
@@ -28,9 +32,8 @@ func (p *Planner) validate(so *SrcObj, t *storage.Inventory, it *Item, rt replTa
 	case schema.KStreaming:
 		it.Warn = append(it.Warn, so.Engine+": потребление начнётся сразу после создания MV (consumer group общий — будет ребаланс партиций)")
 	case schema.KTable:
-		// Нереплицируемая MergeTree на шарде с несколькими репликами: данные между ними не синхронизируются.
-		if strings.HasSuffix(so.Engine, "MergeTree") && len(t.OwnShard(p.cfg.Cluster)) != 1 {
-			it.Warn = append(it.Warn, "нереплицируемая "+so.Engine+": данные между репликами шарда не синхронизируются (как и на старых шардах)")
+		if w := p.plainTableWarning(so, t); w != "" {
+			it.Warn = append(it.Warn, w)
 		}
 	}
 	for _, sp := range schema.StoragePolicies(so.Create) {
@@ -169,4 +172,30 @@ func (p *Planner) validateReplicated(so *SrcObj, t *storage.Inventory, it *Item,
 	}
 	it.Warn = append(it.Warn, "в ZK уже есть соседняя реплика нового шарда: "+strings.Join(children, ","))
 	return true
+}
+
+// noKeeperReason — почему Replicated-объект не создаётся в режиме без Keeper.
+const noKeeperReason = "движок Replicated требует ZooKeeper/Keeper, а в конфиге replication = \"none\" (кластер без Keeper)"
+
+// plainTableWarning — предупреждение для нереплицируемой MergeTree на target, если копии на репликах шарда
+// разойдутся. Кто синхронизирует реплики, решает режим кластера:
+//   - keeper: таблицы Replicated, Distributed пишет в одну реплику (internal_replication=true) —
+//     у MergeTree-таблицы данные окажутся только на ней;
+//   - none: копии пишет сам Distributed (internal_replication=false); при true — тоже только одна реплика.
+func (p *Planner) plainTableWarning(so *SrcObj, t *storage.Inventory) string {
+	if !strings.HasSuffix(so.Engine, "MergeTree") {
+		return ""
+	}
+	own := t.OwnShard(p.cfg.Cluster)
+	if !p.cfg.NoKeeper() {
+		if len(own) != 1 {
+			return "нереплицируемая " + so.Engine + ": данные между репликами шарда не синхронизируются (как и на старых шардах)"
+		}
+		return ""
+	}
+	if len(own) > 1 && own[0].InternalReplication != nil && *own[0].InternalReplication == 1 {
+		return so.Engine + " без Keeper при internal_replication=true: Distributed запишет данные только в одну реплику шарда — " +
+			"реплики разойдутся. Нужно <internal_replication>false</internal_replication>"
+	}
+	return ""
 }

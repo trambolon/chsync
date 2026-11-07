@@ -12,6 +12,12 @@ output_dir = "./chsync-out"
 # false - apply выполняет DDL (с подтверждением, если нет --yes)
 dry_run = true
 
+# Как реплицируются данные в кластере:
+#   keeper — Replicated*-таблицы через ZooKeeper/Keeper, Distributed с internal_replication = true (по умолчанию)
+#   none   — кластер без Keeper: таблицы MergeTree, копии на реплики пишет Distributed (internal_replication = false);
+#            ZooKeeper не проверяется, макросы shard/replica не нужны, Replicated-объекты будут BLOCKED
+replication = "keeper"
+
 [connection]            # общие параметры для всех хостов
 protocol = "http"       # http — HTTP-интерфейс (8123, с TLS 8443) | native — native-протокол (9000, с TLS 9440)
 port = 8123             # по умолчанию: http 8123/8443, native 9000/9440 (зависит от secure)

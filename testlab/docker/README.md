@@ -72,6 +72,29 @@
 
 Проверка сертификата включена: без `ca_file` подключение отклоняется (`x509: certificate signed by unknown authority`).
 
+## Вариант без Keeper (`LAB=nokeeper`)
+
+Тот же набор из 6 ClickHouse, но **без единого Keeper**: таблицы — `MergeTree`-семейство, копии на обе реплики
+шарда пишет Distributed (`internal_replication = false`), макросов `shard`/`replica` нет (только `{cluster}`).
+Без Keeper нет `ON CLUSTER`, поэтому `seed` заливает схему на каждый старый узел отдельно — как это делается на
+таком проде. Конфиг chsync — `chsync.nokeeper.toml` (`replication = "none"`), порты на хосте свои
+(HTTPS 28441–28446, native TLS 29441–29446), так что оба стенда могут работать одновременно.
+
+```bash
+export LAB=nokeeper
+./lab.sh up && ./lab.sh seed
+./lab.sh chsync check                       # 0 ошибок: internal_replication=0 — норма, Keeper не нужен
+./lab.sh chsync plan                        # только схема: 37 CREATE на реплику, без предупреждений
+./lab.sh chsync apply --execute --yes
+./lab.sh expand 1                           # открыть запись в шард 3: Distributed пишет копии на обе реплики
+./lab.sh chsync diff
+./lab.sh down
+```
+
+Схема — `seed/nokeeper-01-schema.sql`: те же виды объектов, что в основном стенде (пустые БД, Replacing/Summing/
+Collapsing, MV с TO и с inner-движком, словарь, UDF в DEFAULT, Log/Memory/Null/Set/Join, Buffer, Merge, VIEW,
+bms и test), только на нереплицируемых движках.
+
 ## Что в тестовой схеме (`seed/01-schema.sql`)
 
 | Что | Объекты | Чем интересно для chsync |

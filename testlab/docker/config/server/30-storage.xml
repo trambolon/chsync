@@ -1,0 +1,18 @@
+<!-- Политика хранения 'tiered' (hot: default, cold: отдельный диск) — общая для обоих вариантов стенда. -->
+<clickhouse>
+    <!-- Для таблиц с storage_policy = 'tiered' (chsync проверяет, что политика есть на target) -->
+    <storage_configuration>
+        <disks>
+            <cold><path>/var/lib/clickhouse/disks/cold/</path></cold>
+        </disks>
+        <policies>
+            <tiered>
+                <volumes>
+                    <hot><disk>default</disk></hot>
+                    <cold><disk>cold</disk></cold>
+                </volumes>
+                <move_factor>0.1</move_factor>
+            </tiered>
+        </policies>
+    </storage_configuration>
+</clickhouse>

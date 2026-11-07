@@ -1,0 +1,11 @@
+<!--
+  Вариант стенда БЕЗ Keeper (LAB=nokeeper): секции <zookeeper> нет вообще.
+  Таблицы — обычные MergeTree, копии на обе реплики шарда пишет Distributed (internal_replication = false).
+  Макросы shard / replica не нужны (их используют только ZK-пути Replicated-таблиц) — задан только {cluster},
+  потому что он используется в Distributed('{cluster}', ...).
+-->
+<clickhouse>
+    <macros>
+        <cluster>lab_cluster</cluster>
+    </macros>
+</clickhouse>

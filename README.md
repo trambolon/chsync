@@ -74,6 +74,31 @@ internal/
 Макросы реплик читаются через `clusterAllReplicas` (те же креды, что у Distributed), поэтому
 сверка охватывает и старые шарды, которых нет в `source.hosts`.
 
+### Кластер без Keeper (`replication = "none"`)
+
+Если в кластере нет ZooKeeper/Keeper, таблицы — обычные `MergeTree`, а копию на каждую реплику шарда пишет
+сам Distributed (`<internal_replication>false</internal_replication>`). Для такого кластера в конфиге:
+
+```toml
+replication = "none"     # по умолчанию "keeper"
+```
+
+Что меняется:
+
+| | `replication = "keeper"` | `replication = "none"` |
+|---|---|---|
+| ZooKeeper | обязателен, `check` проверяет связь, `plan` — ZK-пути | не нужен, ни одного запроса к `system.zookeeper` |
+| Макросы `shard` / `replica` | обязательны, сверяются по всем репликам | не нужны; проверяются только макросы, которые используют DDL (например `{cluster}`) |
+| Новые шарды и их реплики | по макросу `shard` и `remote_servers` | по `remote_servers` (`is_local`) |
+| `internal_replication` у шарда с репликами | `true`; `false` + Replicated = двойная запись → ✗ | `false`; `true` = данные только на одной реплике → ✗ для нового шарда, ! для старого |
+| `Replicated*`-таблицы, БД `Replicated` | создаются | BLOCKED (без Keeper их не создать), `check` → ✗ |
+| MergeTree на шарде с репликами | ! «данные между репликами не синхронизируются» | без предупреждения — реплики синхронизирует Distributed |
+
+Если режим перепутан, `check` подскажет: Keeper недоступен ни на одном target и Replicated-таблиц нет →
+«укажите `replication = "none"`»; Replicated-таблицы есть, а режим `none` → ошибка.
+
+Без Keeper нет и `ON CLUSTER` (distributed DDL) — это не мешает: chsync всегда выполняет CREATE на каждом хосте напрямую.
+
 ## Что именно она проверяет и почему это важно
 
 | Проблема | Что будет без проверки | Что делает chsync |

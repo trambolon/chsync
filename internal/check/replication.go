@@ -46,7 +46,11 @@ func sameReplica(r storage.ClusterRow, x replicaMacros) bool {
 //     нереплицируемая MergeTree при нескольких репликах — данные только на одной из них.
 func (c *checker) checkReplication(ctx context.Context) {
 	cl := c.cfg.Cluster
-	c.h("Репликация шардов")
+	if c.cfg.NoKeeper() {
+		c.h("Репликация шардов (replication = \"none\": без Keeper, копии пишет Distributed)")
+	} else {
+		c.h("Репликация шардов")
+	}
 	// По чьему remote_servers смотрим: первый target, видящий кластер (у него уже новая топология).
 	i := slices.IndexFunc(slices.Concat(c.tgts, c.srcs), func(inv *storage.Inventory) bool { return inv.HasCluster(cl) })
 	if i < 0 {
@@ -68,16 +72,22 @@ func (c *checker) checkReplication(ctx context.Context) {
 		}
 	}
 
-	macroOf := c.readReplicaMacros(ctx, ref, rows)
+	noKeeper := c.cfg.NoKeeper()
+	macroOf := map[int]replicaMacros{}
+	if !noKeeper { // без Keeper макросы shard/replica не обязательны: getMacro упал бы на хосте без них
+		macroOf = c.readReplicaMacros(ctx, ref, rows)
+	}
 
 	// Какие шарды новые: те, в которых target-хосты нашли себя.
 	newShard := map[uint32]bool{}
+	tgtInShard := map[uint32][]string{} // номер шарда -> target-хосты, нашедшие себя в нём
 	for _, t := range c.tgts {
 		if own := t.OwnShard(cl); own != nil {
 			newShard[own[0].ShardNum] = true
+			tgtInShard[own[0].ShardNum] = append(tgtInShard[own[0].ShardNum], t.Name())
 		}
 	}
-	nRepl, nPlain, plainEx := c.tableEngineStats()
+	nRepl, nPlain, plainEx := c.nRepl, c.nPlain, c.plainEx
 
 	want := c.cfg.Target.ReplicasPerShard
 	macroShards := map[string][]uint32{} // значение макроса shard -> номера шардов remote_servers
@@ -112,7 +122,18 @@ func (c *checker) checkReplication(ctx context.Context) {
 			tag = " (новый)"
 		}
 		line := fmt.Sprintf("шард %d%s: %d реплик(и), macro shard=%s, internal_replication=%s", sn, tag, n, strings.Join(ms, ","), irs)
+		if noKeeper { // макросы shard без Keeper не читаются и не нужны
+			line = fmt.Sprintf("шард %d%s: %d реплик(и), internal_replication=%s", sn, tag, n, irs)
+		}
+		if newShard[sn] && len(tgtInShard[sn]) < n {
+			c.warn("шард %d: в remote_servers %d реплик(и), а в target.hosts из них только %s — на остальных репликах схема создана не будет",
+				sn, n, strings.Join(tgtInShard[sn], ", "))
+		}
 		switch {
+		case noKeeper && n > 1 && ir == 1 && newShard[sn]:
+			c.fail("%s — кластер без Keeper: при internal_replication=true Distributed пишет только в одну реплику, остальные останутся пустыми. Нужно <internal_replication>false</internal_replication>", line)
+		case noKeeper && n > 1 && ir == 1:
+			c.warn("%s — кластер без Keeper: при internal_replication=true данные пишутся только в одну реплику шарда (так уже на старом кластере?)", line)
 		case len(ms) > 1:
 			c.fail("%s — у реплик одного шарда разные макросы shard: по ZK они НЕ реплицируют друг друга, а Distributed считает их копиями (SELECT вернёт неполные данные)", line)
 		case n > 1 && ir == 0 && nRepl > 0:
@@ -121,8 +142,12 @@ func (c *checker) checkReplication(ctx context.Context) {
 			c.fail("%s, ожидается replicas_per_shard=%d", line, want)
 		case want > 0 && n != want:
 			c.warn("%s — у старого шарда не %d реплик(и)", line, want)
+		case n == 1 && noKeeper:
+			c.warn("%s — без реплик: нет отказоустойчивости", line)
 		case n == 1:
 			c.warn("%s — без реплик: нет отказоустойчивости. Replicated-таблицы работают (одна реплика в ZK), вторую реплику можно добавить позже без пересоздания", line)
+		case noKeeper && ir == 0:
+			c.ok("%s — копии на все реплики пишет Distributed", line)
 		default:
 			c.ok("%s", line)
 		}
@@ -132,7 +157,10 @@ func (c *checker) checkReplication(ctx context.Context) {
 			c.fail("macro shard=%s у реплик разных шардов remote_servers %v — по ZK это один набор реплик: данные будут общими, через Distributed задвоятся", m, sns)
 		}
 	}
-	if nPlain > 0 && multiReplica {
+	if noKeeper && nRepl > 0 {
+		c.fail("в схеме источников %d Replicated-таблиц, а replication = \"none\": без Keeper их не создать (в плане будут BLOCKED). Кластер с Replicated — replication = \"keeper\"", nRepl)
+	}
+	if nPlain > 0 && multiReplica && !noKeeper {
 		c.warn("%d Distributed над нереплицируемыми MergeTree (например %s): при internal_replication=true данные попадут только на одну реплику шарда", nPlain, plainEx)
 	}
 	c.ok("в схеме источников: Replicated-таблиц %d, Distributed над нереплицируемыми MergeTree %d", nRepl, nPlain)

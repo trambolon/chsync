@@ -138,6 +138,8 @@ func (p *Planner) planDatabases(tp *TargetPlan) {
 			it.Action = AExists
 		case sd.Block != "":
 			it.Action, it.Reason = ABlocked, sd.Block
+		case p.cfg.NoKeeper() && strings.HasPrefix(sd.Engine, "Replicated"):
+			it.Action, it.Reason = ABlocked, noKeeperReason
 		default:
 			it.Action, it.SQL = ACreate, p.prep(sd.Create)
 			if sd.TablesSkip != "" {
@@ -186,7 +188,7 @@ func (p *Planner) planObjects(ctx context.Context, tp *TargetPlan) {
 		}
 		if rt := p.replicaTarget(so, t); rt.ri != nil {
 			repl[k] = rt
-			if rt.err == "" {
+			if rt.err == "" && !p.cfg.NoKeeper() { // без Keeper в ZK не ходим
 				paths = append(paths, rt.path+"/replicas")
 			}
 		}

@@ -1,0 +1,104 @@
+# Стенд для chsync — кластер БЕЗ Keeper: 6 ClickHouse (2 старых шарда × 2 реплики + 1 новый шард × 2 реплики).
+#
+# Репликация без ZooKeeper: таблицы — обычные MergeTree, копию на каждую реплику шарда пишет сам Distributed
+# (<internal_replication>false</internal_replication>). ON CLUSTER без Keeper не работает, поэтому схема
+# заливается на каждый узел отдельно (./lab.sh seed). Макросов shard/replica нет — только {cluster}.
+#
+#   старый кластер:  ch-s1-r1, ch-s1-r2 (шард 1)   ch-s2-r1, ch-s2-r2 (шард 2)
+#   новый шард:      ch-s3-r1, ch-s3-r2 (шард 3)   ← target для chsync
+#
+# Внутри сети — HTTPS 8443 и native TLS 9440, как в основном стенде. Порты на хосте другие,
+# чтобы оба стенда могли работать одновременно:
+#   HTTPS:      28441..28446  →  8443
+#   native TLS: 29441..29446  →  9440
+#
+# Запуск: LAB=nokeeper ./lab.sh up && LAB=nokeeper ./lab.sh seed   (подробно — README.md)
+
+name: chsync-lab-nokeeper
+
+x-clickhouse: &clickhouse
+  image: clickhouse/clickhouse-server:${CH_VERSION:-26.3.2.3}
+  restart: unless-stopped
+  environment:
+    CLICKHOUSE_SKIP_USER_SETUP: "1"
+  ulimits:
+    nofile:   # рекомендация ClickHouse; если Docker не даёт поднять лимит — CH_NOFILE=20000 в .env
+      soft: ${CH_NOFILE:-262144}
+      hard: ${CH_NOFILE:-262144}
+  cap_add: [SYS_NICE, IPC_LOCK]
+  healthcheck:
+    test: ["CMD", "clickhouse", "client", "--query", "SELECT 1"]
+    interval: 3s
+    timeout: 5s
+    retries: 60
+
+# Общие файлы конфигурации. Секции <zookeeper> нет ни в одном из них.
+x-ch-volumes:
+  - &tls ./config/server/10-network-tls.xml:/etc/clickhouse-server/config.d/10-network-tls.xml:ro
+  - &macros ./config/nokeeper/20-macros.xml:/etc/clickhouse-server/config.d/20-macros.xml:ro
+  - &storage ./config/server/30-storage.xml:/etc/clickhouse-server/config.d/30-storage.xml:ro
+  - &users ./config/users:/etc/clickhouse-server/users.d:ro
+  - &certs ./certs:/etc/clickhouse-server/certs:ro
+  - &old ./config/cluster-nk/old:/etc/clickhouse-server/conf.d:ro
+  - &new ./config/cluster-nk/new:/etc/clickhouse-server/conf.d:ro
+
+services:
+  # ─────────────── Старый кластер: шард 1 ───────────────
+  ch-s1-r1:
+    <<: *clickhouse
+    hostname: ch-s1-r1
+    volumes: [*tls, *macros, *storage, *users, *certs, *old, ch-s1-r1:/var/lib/clickhouse]
+    ports: ["28441:8443", "29441:9440"]
+  ch-s1-r2:
+    <<: *clickhouse
+    hostname: ch-s1-r2
+    volumes: [*tls, *macros, *storage, *users, *certs, *old, ch-s1-r2:/var/lib/clickhouse]
+    ports: ["28442:8443", "29442:9440"]
+
+  # ─────────────── Старый кластер: шард 2 ───────────────
+  ch-s2-r1:
+    <<: *clickhouse
+    hostname: ch-s2-r1
+    volumes: [*tls, *macros, *storage, *users, *certs, *old, ch-s2-r1:/var/lib/clickhouse]
+    ports: ["28443:8443", "29443:9440"]
+  ch-s2-r2:
+    <<: *clickhouse
+    hostname: ch-s2-r2
+    volumes: [*tls, *macros, *storage, *users, *certs, *old, ch-s2-r2:/var/lib/clickhouse]
+    ports: ["28444:8443", "29444:9440"]
+
+  # ─────────────── Новый шард 3 (target для chsync) ───────────────
+  ch-s3-r1:
+    <<: *clickhouse
+    hostname: ch-s3-r1
+    volumes: [*tls, *macros, *storage, *users, *certs, *new, ch-s3-r1:/var/lib/clickhouse]
+    ports: ["28445:8443", "29445:9440"]
+  ch-s3-r2:
+    <<: *clickhouse
+    hostname: ch-s3-r2
+    volumes: [*tls, *macros, *storage, *users, *certs, *new, ch-s3-r2:/var/lib/clickhouse]
+    ports: ["28446:8443", "29446:9440"]
+
+  # ─────────────── chsync внутри сети compose ───────────────
+  # LAB=nokeeper ./lab.sh chsync check   ==   docker compose -f docker-compose.nokeeper.yml run --rm chsync check
+  chsync:
+    image: clickhouse/clickhouse-server:${CH_VERSION:-26.3.2.3}
+    profiles: [tools]
+    entrypoint: ["/usr/local/bin/chsync"]
+    working_dir: /work
+    volumes:
+      - ${CHSYNC_BIN:-../../dist/chsync-linux-amd64}:/usr/local/bin/chsync:ro
+      - ./chsync.nokeeper.toml:/work/chsync.toml:ro
+      - ./certs/ca.crt:/work/certs/ca.crt:ro
+      - ./chsync-out:/work/chsync-out
+    depends_on:
+      ch-s3-r1: { condition: service_healthy }
+      ch-s3-r2: { condition: service_healthy }
+
+volumes:
+  ch-s1-r1: {}
+  ch-s1-r2: {}
+  ch-s2-r1: {}
+  ch-s2-r2: {}
+  ch-s3-r1: {}
+  ch-s3-r2: {}

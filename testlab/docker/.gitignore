@@ -3,3 +3,5 @@ chsync-out/
 config/cluster/old/remote_servers.xml
 config/cluster/new/remote_servers.xml
 .env
+config/cluster-nk/old/remote_servers.xml
+config/cluster-nk/new/remote_servers.xml

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -16,6 +17,9 @@ import (
 	"chsync/internal/storage"
 )
 
+// macroRe — {macro} в DDL (служебные {database}, {table}, {uuid} сервер раскрывает сам и в макросах их нет).
+var macroRe = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
 // checker — состояние проверки: хосты по ролям и счётчики ошибок/предупреждений.
 type checker struct {
 	cfg               *config.Config
@@ -23,6 +27,9 @@ type checker struct {
 	w                 io.Writer
 	srcs, tgts, alive []*storage.Inventory
 	errors, warns     int
+
+	nRepl, nPlain int    // в схеме источников: Replicated-таблиц и Distributed над нереплицируемыми MergeTree
+	plainEx       string // пример Distributed над MergeTree
 }
 
 func (c *checker) ok(f string, a ...any)   { fmt.Fprintf(c.w, "  ✓ "+f+"\n", a...) }
@@ -34,7 +41,12 @@ func (c *checker) h(f string, a ...any)    { fmt.Fprintf(c.w, "\n── "+f+"\n"
 func Run(ctx context.Context, cfg *config.Config, invs []*storage.Inventory, w io.Writer) int {
 	c := &checker{cfg: cfg, f: filter.New(cfg.Filter, nil), w: w}
 	c.checkHosts(invs)
-	c.checkMacros()
+	c.nRepl, c.nPlain, c.plainEx = c.tableEngineStats()
+	if cfg.NoKeeper() {
+		c.checkMacrosNoKeeper()
+	} else {
+		c.checkMacros()
+	}
 	if cfg.Cluster != "" {
 		c.checkTopology()
 		c.checkReplication(ctx)
@@ -164,16 +176,73 @@ func (c *checker) checkTopology() {
 }
 
 // checkZooKeeper — target видит ZooKeeper/Keeper (без него Replicated-таблицы будут readonly).
+// В режиме replication = "none" Keeper не нужен — проверка пропускается.
 func (c *checker) checkZooKeeper(ctx context.Context) {
 	c.h("ZooKeeper/Keeper на target")
+	if c.cfg.NoKeeper() {
+		c.ok("replication = \"none\": Keeper не требуется, проверка пропущена")
+		return
+	}
+	failed := 0
+	defer func() {
+		if failed == len(c.tgts) && failed > 0 && c.nRepl == 0 {
+			c.warn("Keeper недоступен ни на одном target, а Replicated-таблиц в схеме нет. Если кластер без Keeper — укажите в конфиге replication = \"none\"")
+		}
+	}()
 	type cnt struct {
 		N uint64 `ch:"n"`
 	}
 	for _, inv := range c.tgts {
 		if _, err := inv.Client.Select[cnt](ctx, "SELECT count() AS n FROM system.zookeeper WHERE path = '/'", nil); err != nil {
+			failed++
 			c.fail("%s: %v", inv.Name(), truncate(err.Error(), 300))
 		} else {
 			c.ok("%s: доступен", inv.Name())
 		}
+	}
+}
+
+// checkMacrosNoKeeper — макросы в кластере без Keeper. shard/replica нужны только ZK-путям Replicated-таблиц,
+// поэтому их отсутствие — не ошибка. Новые шарды и их реплики определяются по remote_servers (см. checkReplication).
+func (c *checker) checkMacrosNoKeeper() {
+	c.h("Макросы (replication = \"none\")")
+	var without []string
+	for _, inv := range c.alive {
+		if len(inv.Macros) == 0 {
+			without = append(without, inv.Name())
+		}
+	}
+	if len(without) > 0 {
+		c.ok("без макросов: %s — для кластера без Keeper это нормально", strings.Join(without, ", "))
+	}
+	// Макросы, которые используют DDL источников (например {cluster} в Distributed), должны быть и на target.
+	used := map[string]bool{}
+	for _, inv := range c.srcs {
+		for k, o := range inv.Objects {
+			if c.f.SkipObject(k, o.Engine) != "" {
+				continue
+			}
+			for _, m := range macroRe.FindAllStringSubmatch(o.Create, -1) {
+				if _, ok := inv.Macros[m[1]]; ok {
+					used[m[1]] = true
+				}
+			}
+		}
+	}
+	for _, m := range slices.Sorted(maps.Keys(used)) {
+		var miss []string
+		for _, t := range c.tgts {
+			if _, ok := t.Macros[m]; !ok {
+				miss = append(miss, t.Name())
+			}
+		}
+		if len(miss) > 0 {
+			c.fail("макрос {%s} используется в DDL источников, но не задан на %s", m, strings.Join(miss, ", "))
+		} else {
+			c.ok("макрос {%s} (используется в DDL) задан на всех target", m)
+		}
+	}
+	if len(used) == 0 && len(without) == 0 {
+		c.ok("макросы в DDL не используются")
 	}
 }

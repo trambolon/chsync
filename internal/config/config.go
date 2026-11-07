@@ -34,6 +34,17 @@ const (
 	PartialSkip PartialPolicy = "skip" // не создавать
 )
 
+// ReplicationMode — как в кластере реплицируются данные.
+type ReplicationMode string
+
+const (
+	// ReplicationKeeper — Replicated*-таблицы через ZooKeeper/Keeper (Distributed с internal_replication=true).
+	ReplicationKeeper ReplicationMode = "keeper"
+	// ReplicationNone — кластер без Keeper: таблицы MergeTree, копии на репликах пишет сам Distributed
+	// (internal_replication=false). Replicated-объекты в таком режиме не создаются.
+	ReplicationNone ReplicationMode = "none"
+)
+
 // GlobalPolicy — что делать с Replicated-таблицей, у которой ZK-путь без макроса шарда.
 type GlobalPolicy string
 
@@ -69,6 +80,8 @@ type Config struct {
 	Cluster   string `toml:"cluster"`    // имя кластера из <remote_servers>
 	OutputDir string `toml:"output_dir"` // куда писать отчёты и SQL
 	DryRun    bool   `toml:"dry_run"`    // apply только показывает план, пока нет --execute
+
+	Replication ReplicationMode `toml:"replication"` // keeper (по умолчанию) | none — кластер без Keeper
 
 	Connection Connection `toml:"connection"`
 	Source     Source     `toml:"source"`
@@ -131,11 +144,12 @@ type DDL struct {
 // поэтому незаданные в файле ключи сохраняют эти значения.
 func Default() Config {
 	return Config{
-		OutputDir:  "./chsync-out",
-		DryRun:     true,
-		Connection: Connection{User: "default", TimeoutSec: 120},
-		Source:     Source{OnConflict: ConflictError, OnPartial: PartialWarn},
-		Filter:     Filter{CascadeExclude: true},
+		OutputDir:   "./chsync-out",
+		Replication: ReplicationKeeper,
+		DryRun:      true,
+		Connection:  Connection{User: "default", TimeoutSec: 120},
+		Source:      Source{OnConflict: ConflictError, OnPartial: PartialWarn},
+		Filter:      Filter{CascadeExclude: true},
 		DDL: DDL{
 			PreserveUUID:     true,
 			IfNotExists:      true,
@@ -178,6 +192,10 @@ func (c *Config) Finalize() {
 	c.Source.OnConflict = cmp.Or(c.Source.OnConflict, def.Source.OnConflict)
 	c.Source.OnPartial = cmp.Or(c.Source.OnPartial, def.Source.OnPartial)
 	c.DDL.GlobalReplicated = cmp.Or(c.DDL.GlobalReplicated, def.DDL.GlobalReplicated)
+	c.Replication = cmp.Or(c.Replication, def.Replication)
+	if c.NoKeeper() {
+		c.DDL.CheckZooKeeper = false // проверять нечего
+	}
 	c.Connection.Protocol = cmp.Or(c.Connection.Protocol, ProtocolHTTP)
 	if c.Connection.Port == 0 {
 		c.Connection.Port = DefaultPort(c.Connection.Protocol, c.Connection.Secure)
@@ -229,6 +247,7 @@ func (c *Config) Validate() error {
 	errs = appendIfErr(errs, oneOf("source.on_conflict", c.Source.OnConflict, ConflictError, ConflictFirst))
 	errs = appendIfErr(errs, oneOf("source.on_partial", c.Source.OnPartial, PartialWarn, PartialSkip))
 	errs = appendIfErr(errs, oneOf("ddl.global_replicated", c.DDL.GlobalReplicated, GlobalBlock, GlobalSkip, GlobalCreate))
+	errs = appendIfErr(errs, oneOf("replication", c.Replication, ReplicationKeeper, ReplicationNone))
 	if c.Target.ReplicasPerShard < 0 {
 		bad("target.replicas_per_shard не может быть отрицательным")
 	}
@@ -307,3 +326,6 @@ func duplicates(ss []string) []string {
 	}
 	return out
 }
+
+// NoKeeper — кластер без ZooKeeper/Keeper (replication = "none").
+func (c *Config) NoKeeper() bool { return c.Replication == ReplicationNone }
