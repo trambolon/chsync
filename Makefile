@@ -1,31 +1,36 @@
-VERSION ?= 1.4.1
-PKG      = chsync/internal/app
-LDFLAGS  = -s -w -X $(PKG).version=$(VERSION)
-GOFLAGS += -mod=vendor -trimpath
-export GOFLAGS
+GO      ?= go
+BINARY  := bin/ddl-saver
 
-.PHONY: build test lint fix dist clean
+.PHONY: all build test cover fuzz test-e2e lint fmt tidy docker clean
+
+all: build
 
 build:
-	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o chsync ./cmd/chsync
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o $(BINARY) ./cmd/ddl-saver
 
 test:
-	go vet ./...
-	go test -race ./...
+	$(GO) test -race -count=1 -shuffle=on ./internal/... ./cmd/...
 
-# Модернизаторы go fix (Go 1.26+): показать, что можно упростить под текущую версию языка.
-fix:
-	go fix -diff ./...
+cover:
+	$(GO) test -count=1 -coverprofile=coverage.out ./internal/... && $(GO) tool cover -func=coverage.out | tail -1
 
-lint: test
-	@test -z "$$(gofmt -l cmd internal)" || (gofmt -l cmd internal; exit 1)
-	@command -v staticcheck >/dev/null && staticcheck ./... || echo "staticcheck не установлен — пропущено"
+fuzz: ## 30s per target
+	for f in FuzzMaskSQL FuzzGuardDDL FuzzExtractDeps; do $(GO) test ./internal/recovery/ -run '^$$' -fuzz "^$$f$$" -fuzztime 30s || exit 1; done
 
-dist: lint
-	mkdir -p dist
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/chsync-linux-amd64 ./cmd/chsync
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/chsync-linux-arm64 ./cmd/chsync
-	cd dist && sha256sum chsync-linux-* > SHA256SUMS
+test-e2e: ## needs a running cluster and E2E_* variables: see test/e2e/README.md
+	$(GO) test -tags e2e -count=1 -timeout 10m ./test/e2e/ -v
+
+lint:
+	golangci-lint run ./...
+
+fmt:
+	gofmt -w ./cmd ./internal ./test
+
+tidy:
+	$(GO) mod tidy
+
+docker:
+	docker build -t ddl-saver:dev .
 
 clean:
-	rm -rf chsync dist
+	rm -rf bin

@@ -1,0 +1,5 @@
+bin/
+coverage.out
+.go/
+.go-cache/
+*.test

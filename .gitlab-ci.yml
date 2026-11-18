@@ -1,0 +1,104 @@
+# CI/CD for ddlSaver.
+#
+# Stages:
+#   lint      — golangci-lint on every push
+#   test      — unit tests with race detector + coverage; fuzzing on MRs
+#   build     — static binary + container image
+#   release   — manual deploy gate
+
+stages: [lint, test, build, release]
+
+variables:
+  GO_VERSION: "1.26"
+  CGO_ENABLED: "0"
+  GOPATH: "$CI_PROJECT_DIR/.go"
+  GOCACHE: "$CI_PROJECT_DIR/.go-cache"
+
+.default-cache: &go-cache
+  cache:
+    key:
+      files: [go.sum]
+    paths: [.go/pkg/mod, .go-cache]
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+lint:
+  stage: lint
+  image: golangci/golangci-lint:v2.1-alpine
+  <<: *go-cache
+  script:
+    - golangci-lint run --timeout 5m ./...
+
+test:unit:
+  stage: test
+  image: golang:${GO_VERSION}
+  <<: *go-cache
+  script:
+    - go mod download
+    - go test -race -count=1 -shuffle=on -coverprofile=coverage.out ./internal/... ./cmd/...
+    - go tool cover -func=coverage.out | tail -1
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    paths: [coverage.out]
+    expire_in: 1 week
+
+# Short fuzz pass on every MR: the three parsers (mask, dependency
+# extraction, execution guard) are the surfaces that take arbitrary text.
+test:fuzz:
+  stage: test
+  image: golang:${GO_VERSION}
+  <<: *go-cache
+  script:
+    - for f in FuzzMaskSQL FuzzGuardDDL FuzzExtractDeps; do
+        go test ./internal/recovery/ -run '^$' -fuzz "^${f}$" -fuzztime 30s || exit 1;
+      done
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# End-to-end (test/e2e) needs a ClickHouse cluster with two replicas, Keeper
+# and TLS, which a plain CI service container does not give you. Run it from
+# a job that can reach a disposable cluster, with the E2E_* variables set:
+#
+#   go test -tags e2e -count=1 -timeout 10m ./test/e2e/ -v
+
+build:binary:
+  stage: build
+  image: golang:${GO_VERSION}
+  <<: *go-cache
+  script:
+    - go build -trimpath -ldflags "-s -w -X main.version=${CI_COMMIT_SHORT_SHA}" -o bin/ddl-saver ./cmd/ddl-saver
+  artifacts:
+    paths: [bin/ddl-saver]
+    expire_in: 1 week
+
+build:image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  script:
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+      --destination "${CI_REGISTRY_IMAGE}:latest"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+release:deploy:
+  stage: release
+  image: alpine:3.20
+  script:
+    - echo "Deploy ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA} — hook your CD here (helm upgrade / nomad job run / ...)"
+  environment:
+    name: production
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+    - if: $CI_COMMIT_TAG
+      when: manual
