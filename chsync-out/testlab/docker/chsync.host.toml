@@ -1,0 +1,29 @@
+# chsync для docker-стенда: запуск С ХОСТА через проброшенные порты HTTPS (18441..18446 → 8443).
+# Запускать из каталога testlab/docker:
+#   ../../chsync check -c chsync.host.toml
+# Сертификат узлов содержит SAN localhost и 127.0.0.1, поэтому проверка TLS проходит.
+
+cluster    = "lab_cluster"
+output_dir = "./chsync-out"
+dry_run    = true
+
+[connection]
+secure   = true
+user     = "admin"
+password = "123456qwe"
+ca_file  = "./certs/ca.crt"
+
+[source]
+hosts = ["localhost:18441", "localhost:18443"]   # ch-s1-r1, ch-s2-r1
+
+[target]
+hosts = ["localhost:18445", "localhost:18446"]   # ch-s3-r1, ch-s3-r2
+expect_shards      = 3
+replicas_per_shard = 2
+
+[filter]
+exclude_databases  = ["test"]
+exclude_name_regex = ["(?i)bms"]
+
+[ddl]
+global_replicated = "block"

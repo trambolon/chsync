@@ -1,0 +1,31 @@
+# chsync для стенда БЕЗ Keeper (LAB=nokeeper): все таблицы — MergeTree, копии пишет Distributed.
+#   LAB=nokeeper ./lab.sh chsync check
+#   LAB=nokeeper ./lab.sh chsync plan
+#   LAB=nokeeper ./lab.sh chsync apply --execute --yes
+#   LAB=nokeeper ./lab.sh chsync diff
+
+cluster     = "lab_cluster"
+output_dir  = "./chsync-out"
+dry_run     = true
+replication = "none"               # кластер без ZooKeeper/Keeper: Replicated-объекты не создаются,
+                                   # internal_replication = false — норма, макросы shard/replica не нужны
+
+[connection]
+protocol = "http"
+port     = 8443
+secure   = true
+user     = "admin"
+password = "123456qwe"
+ca_file  = "./certs/ca.crt"
+
+[source]                           # по одной реплике с каждого старого шарда
+hosts = ["ch-s1-r1", "ch-s2-r1"]
+
+[target]                           # обе реплики нового шарда
+hosts = ["ch-s3-r1", "ch-s3-r2"]
+expect_shards      = 3
+replicas_per_shard = 2
+
+[filter]
+exclude_databases  = ["test"]
+exclude_name_regex = ["(?i)bms"]

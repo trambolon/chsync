@@ -95,10 +95,20 @@ func ExplicitRefs(kind Kind, db, create string) []ObjKey {
 
 // RefersTo — ссылается ли тело DDL объекта из БД db на объект p: "db.name" в любом цитировании,
 // или просто "name", если оба в одной БД (сервер сохраняет такие ссылки как есть).
+//
+// Неквалифицированное имя считается ссылкой только там, где стоит таблица: после FROM / JOIN / TO / INTO / IN
+// или в строке ('dict' в dictGet / joinGet). Иначе колонка, названная как таблица той же БД, давала бы
+// ложную зависимость — и каскадное исключение объекта. Пропущенная зависимость безопаснее ложной:
+// порядок создания исправят повторные проходы apply, а ошибка CREATE видна сразу.
 func RefersTo(db string, p ObjKey, body string) bool {
 	q := regexp.MustCompile(`(?:^|[^\w])` + identAlt(p.DB) + `\s*\.\s*` + identAlt(p.Name) + `(?:[^\w]|$)`)
 	if q.MatchString(body) {
 		return true
 	}
-	return db == p.DB && regexp.MustCompile(`(?:^|[^\w.])`+identAlt(p.Name)+`(?:[^\w]|$)`).MatchString(body)
+	if db != p.DB {
+		return false
+	}
+	name := regexp.QuoteMeta(p.Name)
+	return regexp.MustCompile(`(?i)\b(?:FROM|JOIN|TO|INTO|IN)\s+\(?\s*`+identAlt(p.Name)+`(?:[^\w.]|$)`).MatchString(body) ||
+		regexp.MustCompile(`'`+name+`'`).MatchString(body)
 }

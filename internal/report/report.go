@@ -23,7 +23,7 @@ type Run struct {
 func Open(base, cmd string, now time.Time) (*Run, error) {
 	id := now.Format("20060102-150405")
 	dir := filepath.Join(base, id+"-"+cmd)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil { // в отчётах DDL: при display_secrets — с паролями
 		return nil, fmt.Errorf("каталог отчёта: %w", err)
 	}
 	root, err := os.OpenRoot(dir)
@@ -34,7 +34,9 @@ func Open(base, cmd string, now time.Time) (*Run, error) {
 }
 
 // Create создаёт (или перезаписывает) файл в каталоге запуска. Имя приводится к безопасному виду.
-func (r *Run) Create(name string) (*os.File, error) { return r.root.Create(FileSafe(name)) }
+func (r *Run) Create(name string) (*os.File, error) {
+	return r.root.OpenFile(FileSafe(name), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+}
 
 // Path — полный путь файла в каталоге запуска (для сообщений пользователю).
 func (r *Run) Path(name string) string { return filepath.Join(r.Dir, FileSafe(name)) }

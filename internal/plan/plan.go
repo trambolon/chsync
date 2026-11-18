@@ -53,6 +53,7 @@ type TargetPlan struct {
 	Inv    *storage.Inventory
 	Items  []*Item
 	Counts map[Action]int
+	dbs    map[string]Action // судьба каждой БД на этом target (таблицы не создаются в БД, которой не будет)
 }
 
 func (tp *TargetPlan) add(it *Item) {
@@ -103,7 +104,7 @@ func (p *Planner) prep(sql string) string {
 
 // PlanTarget сравнивает объединённую схему со снимком target и решает судьбу каждого объекта.
 func (p *Planner) PlanTarget(ctx context.Context, t *storage.Inventory) *TargetPlan {
-	tp := &TargetPlan{Inv: t, Counts: map[Action]int{}}
+	tp := &TargetPlan{Inv: t, Counts: map[Action]int{}, dbs: map[string]Action{}}
 	p.planDatabases(tp)
 	p.planFunctions(tp)
 	p.planObjects(ctx, tp)
@@ -149,6 +150,7 @@ func (p *Planner) planDatabases(tp *TargetPlan) {
 				it.Warn = append(it.Warn, "Ordinary-БД: может понадобиться ddl.settings.allow_deprecated_database_ordinary = 1")
 			}
 		}
+		tp.dbs[n] = it.Action
 		tp.add(it)
 	}
 }
@@ -195,6 +197,7 @@ func (p *Planner) planObjects(ctx context.Context, tp *TargetPlan) {
 	}
 	zk := zkState{}
 	if p.cfg.DDL.CheckZooKeeper && len(paths) > 0 {
+		zk.checked = true
 		zk.children, zk.err = storage.ZKChildren(ctx, t.Client, paths)
 	}
 
@@ -211,11 +214,18 @@ func (p *Planner) planObjects(ctx context.Context, tp *TargetPlan) {
 			it.Action = AExists
 		case so.Block != "":
 			it.Action, it.Reason = ABlocked, so.Block
+		case tp.dbs[k.DB] == ABlocked:
+			it.Action, it.Reason = ABlocked, "БД "+k.DB+" не будет создана (BLOCKED)"
 		default:
 			for _, d := range so.Deps { // зависимость не будет создана — и этот объект тоже
 				if st := state[d]; st == ABlocked || st == ASkip {
 					it.Action, it.Reason = ABlocked, "зависит от "+d.String()+" ("+st.String()+")"
 					break
+				}
+			}
+			for _, d := range so.ExtDeps { // зависимость вне этого прогона должна уже существовать на target
+				if _, ok := t.Objects[d]; !ok && it.Action != ABlocked {
+					it.Action, it.Reason = ABlocked, "зависит от "+d.String()+": его БД вне include_databases / --databases, и на target его нет"
 				}
 			}
 			if it.Action != ABlocked {
@@ -232,6 +242,7 @@ func (p *Planner) planObjects(ctx context.Context, tp *TargetPlan) {
 
 // zkState — результат пакетной проверки ZK-путей на target.
 type zkState struct {
+	checked  bool                // проверка ZK выполнялась (ddl.check_zookeeper и есть что проверять)
 	children map[string][]string // path/replicas -> имена реплик; пути нет в map — состояние неизвестно
 	err      error               // часть путей проверить не удалось
 }

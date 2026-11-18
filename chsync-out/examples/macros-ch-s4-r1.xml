@@ -1,0 +1,16 @@
+<!--
+  /etc/clickhouse-server/config.d/macros.xml на ch-s4-r1.
+  Формат значений - ТОЧНО как на старых хостах: если там <shard>01</shard>, то тут 04; если 1 - то 4.
+  Правила:
+    shard   - одинаковый у двух реплик одного шарда, НЕ совпадает ни с одним старым шардом
+    replica - уникален в пределах шарда (лучше - во всём кластере: обычно FQDN хоста)
+    cluster - если макрос {cluster} используется в DDL (Distributed('{cluster}', ...)) - как на старых
+  Макросы читаются при старте: задать ДО первого запуска clickhouse-server и не менять потом.
+-->
+<clickhouse>
+    <macros>
+        <shard>04</shard>
+        <replica>ch-s4-r1.prod.local</replica>
+        <cluster>prod_cluster</cluster>
+    </macros>
+</clickhouse>

@@ -137,7 +137,8 @@ case "${1:-}" in
   status) status ;;
   q) shift; q "$@" ;;
   client) dc exec "${2:?узел}" clickhouse client -u "$USER_NAME" --password "$PASSWORD" ;;
-  chsync) shift; mkdir -p chsync-out; dc run --rm chsync "$@" ;;
+  # от имени текущего пользователя: отчёты создаются с правами 0600, иначе их владельцем стал бы root контейнера
+  chsync) shift; mkdir -p chsync-out; dc run --rm --user "$(id -u):$(id -g)" chsync "$@" ;;
   certs) certs ;;
   down) dc --profile tools down -v --remove-orphans ;;
   *) sed -n '2,17p' "$0"; exit 1 ;;

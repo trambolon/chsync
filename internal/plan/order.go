@@ -60,7 +60,8 @@ func dependsKinds(k schema.Kind) func(*SrcObj) bool {
 func (u *Union) cascadeExclude(enabled bool) {
 	for changed := true; changed; {
 		changed = false
-		excl := nameIndex(u.Objects, func(o *SrcObj) bool { return o.Skip != "" })
+		// Объекты вне include_databases не «исключены»: они могут уже быть на target (см. ExtDeps).
+		excl := nameIndex(u.Objects, func(o *SrcObj) bool { return o.Skip != "" && !o.OutScope })
 		for _, o := range u.Objects {
 			if o.Skip != "" {
 				continue
@@ -82,6 +83,7 @@ func (u *Union) cascadeExclude(enabled bool) {
 // buildDeps вычисляет зависимости неисключённых объектов и порядок создания.
 func (u *Union) buildDeps() {
 	cand := nameIndex(u.Objects, func(o *SrcObj) bool { return o.Skip == "" })
+	ext := nameIndex(u.Objects, func(o *SrcObj) bool { return o.OutScope })
 	var keys []schema.ObjKey
 	for k, o := range u.Objects {
 		if o.Skip != "" {
@@ -90,6 +92,7 @@ func (u *Union) buildDeps() {
 		keys = append(keys, k)
 		if o.Kind != schema.KDictionary { // словари грузятся лениво: источник при CREATE не нужен
 			o.Deps = u.refs(o, cand, dependsKinds(o.Kind))
+			o.ExtDeps = u.refs(o, ext, dependsKinds(o.Kind))
 		}
 	}
 	u.Order = topoSort(u.Objects, keys)

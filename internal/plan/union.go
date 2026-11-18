@@ -20,6 +20,8 @@ type SrcObj struct {
 	Hosts    []string            // источники, на которых объект есть
 	Variants map[string][]string // нормализованный DDL -> источники (больше одного — дрейф схемы)
 	Skip     string              // причина исключения (фильтр или каскад)
+	OutScope bool                // пропущен только потому, что БД вне include_databases / --databases
+	ExtDeps  []schema.ObjKey     // ссылки на объекты вне текущего прогона: должны уже быть на target
 	Block    string              // причина блокировки (конфликт DDL, секреты и т.п.)
 	Warn     []string
 	Deps     []schema.ObjKey // от чего зависит: создаётся только после них
@@ -152,7 +154,7 @@ func (u *Union) mergeObjects(alive []*storage.Inventory, f *filter.Filter, cfg *
 	}
 	for k, so := range u.Objects {
 		if r := f.SkipObject(k, so.Engine); r != "" {
-			so.Skip = r
+			so.Skip, so.OutScope = r, f.OutOfScope(k.DB)
 			continue
 		}
 		if sd := u.DBs[k.DB]; sd != nil && sd.TablesSkip != "" {

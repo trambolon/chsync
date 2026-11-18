@@ -71,6 +71,13 @@ func (f *Filter) SkipDB(db string) string {
 	return f.matchName(db)
 }
 
+// OutOfScope — БД не исключена, а просто не входит в текущий прогон (include_databases / --databases).
+// Её объекты не переносятся сейчас, но могут уже существовать на target — каскад от них не запускается.
+func (f *Filter) OutOfScope(db string) bool {
+	l := strings.ToLower(db)
+	return len(f.include) > 0 && !f.include[l] && !f.excludeDB[l] && f.matchName(db) == ""
+}
+
 // SkipObject возвращает причину пропуска объекта или "": БД, точное имя, регэксп имени, движок.
 func (f *Filter) SkipObject(k schema.ObjKey, engine string) string {
 	if r := f.SkipDB(k.DB); r != "" {

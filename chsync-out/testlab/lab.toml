@@ -1,0 +1,23 @@
+# Конфиг chsync для локального стенда testlab/lab.sh
+cluster = "main"
+output_dir = "./.out"
+dry_run = true
+
+[connection]
+user = "default"
+
+[source]
+hosts = ["127.0.0.1:8121", "127.0.0.1:8123"]   # по реплике со старых шардов 01 и 02
+
+[target]
+hosts = ["127.0.0.1:8125", "127.0.0.1:8126"]   # реплики нового шарда 03
+expect_shards = 3
+replicas_per_shard = 2  # rf новых шардов: check сверит хосты, remote_servers, internal_replication, макросы
+
+[filter]
+exclude_databases = ["test"]
+exclude_name_regex = ["(?i)bms"]
+# exclude_engines = ["Kafka"]   # раскомментировать для первого прогона (см. RUNBOOK, шаг 7)
+
+[ddl]
+global_replicated = "create"    # BD2.dim_p - путь без {shard}; поставьте "block", чтобы увидеть BLOCKED

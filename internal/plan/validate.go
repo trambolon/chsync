@@ -97,8 +97,17 @@ func (p *Planner) validateReplicated(so *SrcObj, t *storage.Inventory, it *Item,
 	it.Info = "zk=" + rt.path + " replica=" + rt.repl
 	it.ExpZK, it.ExpRepl = rt.path, rt.repl
 	children, zkKnown := zk.children[rt.path+"/replicas"]
-	if zk.err != nil {
-		it.Warn = append(it.Warn, "проверка ZK не выполнена: "+zk.err.Error())
+	// Проверка ZK включена, но состояние именно этого пути узнать не удалось: создавать вслепую нельзя —
+	// по пути могут быть реплики старого шарда или остаток прошлой попытки.
+	zkBlind := func() bool {
+		if !zk.checked || zkKnown {
+			return false
+		}
+		reason := "состояние ZK-пути " + rt.path + " проверить не удалось"
+		if zk.err != nil {
+			reason += " (" + zk.err.Error() + ")"
+		}
+		return !block(reason + ". Повторите запуск; осознанно отключить проверку — ddl.check_zookeeper = false")
 	}
 
 	if !schema.TemplateHasMacro(rt.tmplPath, p.cfg.DDL.ShardMacros) {
@@ -108,6 +117,9 @@ func (p *Planner) validateReplicated(so *SrcObj, t *storage.Inventory, it *Item,
 			return block(msg + ". Решите явно: ddl.global_replicated = \"create\" (подключить к общему набору, данные скачаются целиком) или \"skip\"")
 		case config.GlobalSkip:
 			it.Action, it.Reason = ASkip, msg
+			return false
+		}
+		if zkBlind() {
 			return false
 		}
 		it.Warn = append(it.Warn, msg+": хост присоединится к существующему набору реплик и скачает все данные")
@@ -134,24 +146,51 @@ func (p *Planner) validateReplicated(so *SrcObj, t *storage.Inventory, it *Item,
 		return block("развёрнутый ZK-путь " + rt.path + " совпадает с путём на источнике " + strings.Join(collide, ",") +
 			" — коллизия макроса шарда! Хост стал бы репликой старого шарда")
 	}
-	if !zkKnown || len(children) == 0 {
-		return true
-	}
-
-	// В ZK уже есть реплики по этому пути: допустимы только соседи по новому шарду (тот же макрос shard).
+	// Другие target: у реплик одного шарда remote_servers ZK-путь должен совпадать, у разных шардов — различаться.
+	// Иначе по ZK и по remote_servers получаются разные наборы реплик (задвоение или неполные данные).
+	// Сверяем сами пути, а не макрос "shard": так проверка не зависит от имён макросов.
 	siblings := map[string]bool{}
 	var unread []string // target, снимок которых не прочитан: их реплика могла бы быть «соседом»
+	own := t.OwnShard(p.cfg.Cluster)
 	for _, ot := range p.targets {
-		switch {
-		case ot == t:
-		case ot.Err != nil:
+		if ot == t {
+			continue
+		}
+		if ot.Err != nil {
 			unread = append(unread, ot.Name())
-		case ot.Macros["shard"] == t.Macros["shard"]:
+			continue
+		}
+		tmpl := rt.tmplPath
+		if rt.ri.Defaults {
+			tmpl = ot.ServerSettings["default_replica_path"]
+		}
+		otPath, _ := schema.ExpandMacros(tmpl, ot.Macros, special)
+		samePath := otPath == rt.path
+		if oo := ot.OwnShard(p.cfg.Cluster); len(own) > 0 && len(oo) > 0 {
+			sameShard := own[0].ShardNum == oo[0].ShardNum
+			switch {
+			case samePath && !sameShard:
+				return block(fmt.Sprintf("ZK-путь %s совпадает с путём target %s, но в remote_servers это разные шарды (%d и %d) — "+
+					"ошибка в макросах: хосты стали бы репликами друг друга, данные через Distributed задвоятся",
+					rt.path, ot.Name(), own[0].ShardNum, oo[0].ShardNum))
+			case !samePath && sameShard:
+				return block(fmt.Sprintf("target %s — реплика того же шарда %d в remote_servers, но его ZK-путь другой (%s) — "+
+					"ошибка в макросах: реплики одного шарда не будут реплицировать друг друга", ot.Name(), own[0].ShardNum, otPath))
+			}
+		}
+		if samePath {
 			if r, _ := schema.ExpandMacros(rt.tmplRepl, ot.Macros, special); r != "" {
 				siblings[r] = true
 			}
 		}
 	}
+	if zkBlind() {
+		return false
+	}
+	if len(children) == 0 {
+		return true
+	}
+	// В ZK уже есть реплики по этому пути: допустимы только соседи по новому шарду.
 	var foreign []string
 	for _, ch := range children {
 		if ch == rt.repl {

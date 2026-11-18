@@ -1,0 +1,52 @@
+<!--
+  /etc/clickhouse-server/config.d/remote_servers.xml - ОДИНАКОВЫЙ файл на всех 10 хостах.
+  Перечитывается на лету (без рестарта) через несколько секунд после изменения файла
+  или сразу по SYSTEM RELOAD CONFIG. Проверка: SELECT * FROM system.clusters WHERE cluster='prod_cluster'.
+
+  Фаза 1: новые шарды 4 и 5 с weight=0 -> участвуют в SELECT, но INSERT через Distributed в них НЕ идут.
+  Фаза 2: поднять weight (см. RUNBOOK, раздел про перебалансировку).
+
+  Если у вас кластер описан в /etc/metrika.xml (include_from / incl="clickhouse_remote_servers"),
+  правьте его там - важно, чтобы источник был один и тот же на всех хостах.
+-->
+<clickhouse>
+    <remote_servers>
+        <prod_cluster>
+            <!-- межсерверный секрет: как на старых хостах (если используется) -->
+            <!-- <secret from_env="CH_CLUSTER_SECRET"/> -->
+            <shard>
+                <weight>1</weight>
+                <internal_replication>true</internal_replication>
+                <replica><host>ch-s1-r1.prod.local</host><port>9000</port></replica>
+                <replica><host>ch-s1-r2.prod.local</host><port>9000</port></replica>
+            </shard>
+            <shard>
+                <weight>1</weight>
+                <internal_replication>true</internal_replication>
+                <replica><host>ch-s2-r1.prod.local</host><port>9000</port></replica>
+                <replica><host>ch-s2-r2.prod.local</host><port>9000</port></replica>
+            </shard>
+            <shard>
+                <weight>1</weight>
+                <internal_replication>true</internal_replication>
+                <replica><host>ch-s3-r1.prod.local</host><port>9000</port></replica>
+                <replica><host>ch-s3-r2.prod.local</host><port>9000</port></replica>
+            </shard>
+
+            <!-- ===== новые шарды. Порядок shard важен: ТОЛЬКО дописывать в конец, ===== -->
+            <!-- ===== существующие шарды не переставлять (иначе сменится маршрутизация) ===== -->
+            <shard>
+                <weight>0</weight>   <!-- фаза 1: только чтение -->
+                <internal_replication>true</internal_replication>
+                <replica><host>ch-s4-r1.prod.local</host><port>9000</port></replica>
+                <replica><host>ch-s4-r2.prod.local</host><port>9000</port></replica>
+            </shard>
+            <shard>
+                <weight>0</weight>   <!-- фаза 1: только чтение -->
+                <internal_replication>true</internal_replication>
+                <replica><host>ch-s5-r1.prod.local</host><port>9000</port></replica>
+                <replica><host>ch-s5-r2.prod.local</host><port>9000</port></replica>
+            </shard>
+        </prod_cluster>
+    </remote_servers>
+</clickhouse>
