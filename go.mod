@@ -1,10 +1,25 @@
-module gitlab.example.com/infra/ddl-saver
+module chsync
 
-go 1.26
+go 1.27
 
 require (
-	github.com/go-co-op/gocron/v2 v2.23.1
-	github.com/pelletier/go-toml/v2 v2.4.3
-	github.com/vahid-sohrabloo/chconn/v3 v3.0.3
-	gitlab.com/gitlab-org/api/client-go v0.130.0
+	github.com/BurntSushi/toml v1.6.0
+	github.com/ClickHouse/clickhouse-go/v2 v2.50.0
+)
+
+require (
+	github.com/ClickHouse/ch-go v0.74.0 // indirect
+	github.com/andybalholm/brotli v1.2.6 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/go-faster/city v1.0.1 // indirect
+	github.com/go-faster/errors v0.7.1 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/paulmach/orb v0.13.0 // indirect
+	github.com/pierrec/lz4/v4 v4.1.27 // indirect
+	github.com/segmentio/asm v1.2.1 // indirect
+	github.com/shopspring/decimal v1.5.0 // indirect
+	go.opentelemetry.io/otel v1.47.0 // indirect
+	go.opentelemetry.io/otel/trace v1.47.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 )
